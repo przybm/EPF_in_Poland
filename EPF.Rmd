@@ -1,0 +1,1642 @@
+---
+title: "Prognozowanie hurtowych cen energii elektrycznej na polskim rynku towarowym przy wykorzystaniu modeli ARIMA, regresji liniowej i rekurencyjnej sieci neuronowej"
+author: "Maciej Przybyła"
+date: "`r Sys.Date()`"
+bibliography: _bibliografia.bib
+csl: uniwersytet-kardynala-stefana-wyszynskiego-w-warszawie-przypis.csl
+output:
+  bookdown::word_document2:
+    reference_docx: EPF_style.docx
+    toc: TRUE
+    number_sections: FALSE
+toc-title: Spis treści
+---
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+library(tidyverse)
+library(knitr)
+library(lubridate)
+library(tsibble)
+library(fabletools)
+library(fable)
+library(feasts)
+library(fastDummies)
+library(future)
+library(grid)
+library(caret)
+library(glmnet)
+library(doParallel)
+
+options(dplyr.summarise.inform = FALSE)
+options(scipen = 999)
+opts_chunk$set(cache = TRUE, fig.width = 6)
+
+trainRNN <- FALSE
+
+```
+
+## Modelowanie cen energii
+
+Energia elektryczna jest bardzo szczególnym towarem z kilku powodów. Ze względu na trudności związane z jej przechowywaniem i magazynowaniem oraz pomimo postępów w zakresie wydajności baterii w ostatnich latach, nadal jest w dużej mierze dobrem nietrwałym. Bezpieczeństwo dostaw energii elektrycznej do odbiorców końcowych wymaga stałej równowagi między wielkością produkcji a zapotrzebowaniem, z których oba są zależne od warunków pogodowych i intensywności działalności gospodarczej. Ponadto, w porównaniu z innymi towarami hurtowe ceny energii elektrycznej na rynku spot wykazują się sezonowością dobową, tygodniową i miesięczną oraz charakteryzują się niestabilnością i wysoką zmiennością [@epf].
+
+Wysoka temperatura może spowodować skokowy wzrost zapotrzebowania na energię elektryczną, związany ze zwiększoną pracą urządzeń klimatyzacyjnych. Jednocześnie niski stan wód w rzekach, wykorzystywanych do chłodzenia bloków energetycznych, może ograniczyć wytwarzanie energii elektrycznej z konwencjonalnych źródeł, przyczyniając się do niedoboru podaży i gwałtownego wzrostu cen. Do spadku cen, w niektórych sytuacjach nawet do ujemnych wartości, może natomiast prowadzić nadmiar podaży w okresach zmniejszonego zapotrzebowania, wynikający ze wzrostu produkcji ze źródeł odnawialnych na skutek warunków atmosferycznych, na przykład silnego wiatru, napędzającego turbiny wiatrowe.
+
+Obok zjawisk atmosferycznych, które do pewnego stopnia można przewidzieć w krótkim horyzoncie czasowym, na wahania hurtowych cen energii elektrycznej na rynku spot mają wpływ również awarie krytycznych elementów systemu.
+
+W dłuższej perspektywie hurtowe ceny energii elektrycznej w Polsce kształtowane są przez koszty zakupu węgla (z którego wytwarza się nadal prawie 80% energii), koszty zakupu uprawnień do emisji CO~2~, niską konkurencję na rynku energii elektrycznej oraz koszty rozwoju i modernizacji infrastruktury wytwórczej i sieciowej energii elektrycznej [@ksceewp].
+
+Hurtowy obrót energią elektryczną w Polsce odbywa się na Towarowej Giełdzie Energii S.A. (TGE), w której uczestniczą wytwórcy energii elektrycznej, spółki obrotu oraz najwięksi odbiorcy przemysłowi. W ramach TGE funkcjonuje Rynek Dnia Następnego (RDN), stanowiący rynek spot dla energii elektrycznej w Polsce.
+
+Handel energią elektryczną na RDN prowadzony jest każdego dnia i określanie cen odbywa się na jeden dzień poprzedzający dzień dostawy, w którym następuje rozliczenie kontraktu poprzez fizyczną dostawę energii elektrycznej w godzinie wyznaczonej przez zawarty kontrakt. Każda doba podzielona jest na dwadzieścia cztery godziny dostawy (z wyjątkiem dni, w których następuje odwołanie czasu zimowego lub letniego) i każdy uczestnik RDN składa zlecenia kupna lub sprzedaży energii elektrycznej dla poszczególnych godzin doby. O godzinie 10:30 w dniu poprzedzającym dzień dostawy następuje określenie kursów dla wszystkich godzin, zwanych kursem jednolitym, który obowiązuje we wszystkich transakcjach na rynku [@rortgtgesa].
+
+Celem niniejszej pracy jest zbudowanie modelu prognozowania cen kontraktów godzinowych na dostawę energii elektrycznej na RDN, ustalanych podczas określania kursu jednolitego o godzinie 10:30.
+
+Do prognozowania cen energii elektrycznej w krótkim terminie stosuje się różne klasy modeli, których zwięzły przegląd znajduje się w @epf. Wśród najczęściej stosowanych spotyka się regresję wieloraką, sieci neuronowe oraz modele wielowymiarowe.
+
+Intuicja podpowiada, że dobrą prognozą takich cen mogą być ceny z dnia poprzedniego lub ceny z danego dnia z poprzedniego tygodnia, czyli z uwzględnieniem tygodniowej sezonowości, którą charakteryzują się hurtowe ceny energii elektrycznej. Obie metody mogą stanowić punkt odniesienia do oceny przygotowanych modeli.
+Zbudowane zostaną modele ARIMA, regresji liniowej, regresji liniowej z błędami ARIMA (ARIMAX) oraz rekurencyjnej sieci neuronowej z dwukierunkową warstwą jednostek typu GRU. Do uczenia modeli zostaną wykorzystane historyczne ceny kontraktów godzinowych oraz prognozy na zapotrzebowanie mocy, które są łatwo dostępne.
+
+## Metodologia
+
+W celu rozwiązania sformułowanego we wstępie pracy zadania, proponowany model musi każdego dnia przed godziną 10:30, kiedy ustalany jest kurs jednolity, prognozować ceny kontraktów terminowych na dwadzieścia cztery godziny dostawy następnej doby, na podstawie dostępnych informacji. Warunek ten nakłada na model konieczność prognozowania dwudziestu czterech wartości łącznie.
+
+W pracy przedstawione i porównane ze sobą zostaną trzy podejścia. Pierwszym podejściem będzie zbudowanie modelu klasy ARIMA na godzinowym szeregu czasowym i wykorzystaniem go do zaprognozowania cen w kolejnych dwudziestu czterech odstępach (w tym przypadku godzinach).
+Drugim podejściem będzie zbudowanie modeli regresji liniowej oraz modeli klasy ARIMAX dla każdej godziny doby osobno. Wówczas do budowy modeli użyte zostaną dwadzieścia cztery szeregi czasowe o odstępie równym jednej dobie. Dodatkowymi zmiennymi objaśniającymi będą informacje o cenach w pozostałych godzinach doby, które nie są dostępne w podstawowym szeregu. Prognoza cen kontraktów na dostawę energii elektrycznej będzie wektorem składającym się z dwudziestu czterech prognoz wyliczonych przez poszczególne modele przygotowane dla każdej godziny osobno.
+
+Trzecim podejściem będzie wytrenowanie rekurencyjnej sieci neuronowej z dwukierunkową warstwą jednostek typu GRU, w której warstwą wyjściową będzie warstwa gęsta składająca się z dwudziestu czterech neuronów, stanowiących prognozę cen kontraktów na kolejny dzień.
+
+W literaturze dotyczącej prognozowania cen energii elektrycznej w krótkim terminie stosuje się różne długości szeregu czasowego, na którym buduje się modele prognostyczne. W wielu badaniach stosuje się okres roczny lub dwuletni, lecz używane są również okresy składające się tylko z dziesięciu dni [@epf]. Wybór długości źródłowego szeregu czasowego do budowy modelu jest zatem arbitralny i zależy w dużym stopniu od ograniczeń zastosowanego modelu. Do wyuczenia rekurencyjnej sieci neuronowej wymagany jest relatywnie długi szereg czasowy, natomiast aby spełnić założenia modelu ARIMA odnośnie do stacjonarności szeregu lepiej użyć krótszego okresu, w szczególności, gdy badany jest szereg godzinowy o złożonej sezonowości jak w przypadku cen energii elektrycznej. Ponadto na ceny energii elektrycznej w długim horyzoncie czasowym mogą wpływać czynniki, których znaczenie w prognozowaniu krótkoterminowym jest nieistotne, bo ich efekt jest już uwzględniony w bieżących cenach, stanowiących zmienne objaśniające w modelach.
+
+Wobec powyższych uwag do budowy modeli zostaną użyte różne zbiory treningowe i walidacyjne. Model klasy ARIMA na godzinowym szeregu czasowym oraz modele klasy ARIMAX zostaną zbudowane na szeregu czasowym o długości jednego roku, natomiast model oparty o rekurencyjną sieć neuronową zostanie wytrenowany na danych z okresu trzech lat. Ostatni dniem, na którym modele będą uczone i walidowane w obu przypadkach jest 31 marca 2020 roku.
+Wszystkie modele oceniane będą na zbiorze testowym, rozłącznym ze zbiorem treningowym, składającym się wyłącznie z cen kontraktów terminowych dla drugiego kwartału 2020 roku. 
+
+Do oceny dokładności prognoz stosowany będzie średni błąd bezwzględny (MAE) ze względu na jego łatwą interpretację i umiarkowaną podatność na obserwacje odstające [@aipsz]. Średni błąd bezwzględny zdefiniowany jest wzorem
+
+$$MAE = \frac{1}{n}\sum_{i=1}^{n}|C_i - P_i|,$$
+
+gdzie $n$ jest liczbą obserwacji w zbiorze, $C_i$ ceną energii elektrycznej a $P_i$ prognozą ceny w momencie $i$.
+
+Dla każdego z modeli policzony zostanie średni błąd bezwzględny dla wszystkich obserwacji oraz średni błąd bezwzględny w zależności od godziny dostawy, na którą zawierany jest kontrakt, będący przedmiotem prognozy. Pozwoli to dokładniej ocenić jakość prognoz poszczególnych modeli i wskazać ich przewagi nad metodami naiwnymi, o ile takie przewagi istnieją.
+
+## Analiza i wyniki modelowania
+
+### Źródła i opis danych
+
+W pracy wykorzystano dwa źródła danych: archiwalne ceny kontraktów godzinowych oraz archiwalne prognozowane zapotrzebowanie mocy.
+
+Źródłem danych dla historycznych cen kontaktów godzinowych na energię elektryczną są archiwalne notowania rynku dnia następnego, udostępnione na stronach [Towarowej Giełdy Energii (TGE)](https://www.tge.pl/energia-elektryczna-rdn).
+
+Źródłem danych dla historycznych prognoz zapotrzebowania mocy jest archiwum Krajowego Systemu Elektroenergetycznego, udostępnione na stronach [Polskich Sieci Elektroenergetycznych (KSE)](https://www.pse.pl/obszary-dzialalnosci/krajowy-system-elektroenergetyczny/zapotrzebowanie-kse).
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+temp <- read_lines("data/RDN_CONTRACTS_REPORT.csv", skip = 2, n_max = 1)
+temp1 <- temp %>% str_replace_all(";", ", ") %>%
+  str_replace_all("notowan ciaglych", "notowań ciągłych")
+temp2 <- temp %>% str_split(";")
+
+```
+
+Każdy kontrakt jest opisany następującymi parametrami: `r temp1`. Ceną, która będzie podlegała modelowaniu jest `r str_remove_all(temp2[[1]][4], " \\(PLN/MWh\\)")`.
+
+W ciągu każdego roku występują dwa dni, kiedy doba ma mniej lub więcej  niż dwadzieścia cztery godziny. Jest to dzień odwołania czasu letniego i dzień odwołania czasu zimowego.
+
+W dniu odwołania czasu zimowego doba ma dwadzieścia trzy godziny i wówczas w danych nie pojawiają się kontrakty na brakującą godzinę dostawy. Brak ceny kontraktów na godzinę drugą, kiedy następuje odwołanie czasu zimowego, został zastąpiony średnią z cen kontraktów na godzinę pierwszą i trzecią. Analogicznie, brakujące obserwacje o zapotrzebowaniu mocy dla godziny drugiej z dnia odwołania czasu zimowego zostały zastąpione średnią z godziny pierwszej i trzeciej.
+
+W dniu odwołania czasu letniego doba ma dwadzieścia pięć godzin. Dla uproszczenia, te dodatkowe kontrakty na godzinę drugą, kiedy następuje zmiana czasu, usunięto z danych. Analogicznie, obserwacje dotyczące zapotrzebowania mocy dla dodatkowej godziny również zostały usunięte.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+#Odczyt pliku CSV z danychmi z Towarowej Giełdy Energii
+#Ustalenie typów zmiennych oraz pominięcie zbędnych kolumn
+
+#Kolumna zawierającą godzinę dostawy zostanie zaczytana jako zmienna tekstowa, ponieważ w dniu odwołania czasu letniego doba ma dwadzieścia pięć godzin i kontrakty na dodatkową godzinę dostawy są oznaczone w tej kolumnie symbolem "02a". Dla uproszczenia te dodatkowe kontrakty na godzinę drugą zostaną usunięte z danych, a kolumna z godziną dostawy zostanie przekształcona na typ całkowitoliczbowy.
+
+srcPrices <- read_delim("data/RDN_CONTRACTS_REPORT.csv", delim = ";",
+                        col_types = cols(col_date(),
+                                         col_date(),
+                                         col_character(),
+                                         col_double(),
+                                         col_skip(),
+                                         col_skip(),
+                                         col_skip(),
+                                         col_skip(),
+                                         col_skip()),
+                        col_names = c("trading_date", "delivery_date", "Hour", "Price"),
+                        locale = locale(decimal_mark = "."), skip = 3)
+
+#Usunięcie nadmiarowych obserwacji (godzina 02a) podczas zmiany czasu z letniego na zimowy
+
+srcPrices <- srcPrices %>% filter(!str_detect(Hour, "a")) %>%
+  mutate(Hour = as.integer(Hour))
+
+#Dodanie dodatkowej obserwacji równiej średniej z sąsiednich obserwacji podczas zmiany czasu zimowego na letni
+
+specialCases <- srcPrices %>% group_by(trading_date, delivery_date) %>%
+  summarize(n = n(), Price = sum(if_else(Hour <= 3, 1, 0) * Price/2)) %>%
+  filter(n < 24) %>% select (-n) %>% mutate(Hour = 2L)
+
+srcPrices <- srcPrices %>% add_row(specialCases) %>% arrange(trading_date, Hour)
+
+#Odczyt plików CSV z danymi z Polski Sieci Elektroenergetycznych
+
+srcFiles <- list.files("data", pattern = "LOAD*|ZAP*")
+
+read_Loads <- function(file) {
+  
+  read_delim(paste0("data/", file), delim = ";",
+            col_types = cols(col_date(format = "%Y%m%d"),
+                             col_character(),
+                             col_double(),
+                             col_double()),
+            col_names = c("delivery_date", "Hour", "fctLoad", "actLoad"),
+            locale = locale(decimal_mark = ","), na = c("", "-", "NA"), skip = 1)
+}
+
+srcLoads <- bind_rows(map(srcFiles, read_Loads))
+
+#Analogicznie jak w przypadku danych zawierających ceny kontraktów terminowych, obserwacje dotyczące dodatkowej godziny podczas odwołania czasu letniego zostaną usunięte. Ponadto ze względu na inne oznaczenie godzin dostawy w plikach KSE dokonana zostanie zmiana numeracji na numerację godzin zgodną z plikiem TGE.
+
+#Usunięcie nadmiarowych obserwacji (godzina 2A) podczas zmiany czasu letniego na zimowy
+#i zmiana numeracji godziny dostawy podczas zmiany czasu zimowego na letni
+
+srcLoads <- srcLoads %>% filter(!str_detect(Hour, "A")) %>%
+  mutate(Hour = as.integer(Hour), actLoad = if_else(is.na(actLoad), fctLoad, actLoad)) %>%
+  group_by(delivery_date) %>%
+  mutate(c1 = max(Hour), c2 = is.na(lag(Hour))) %>%
+  ungroup() %>% mutate(r = if_else(c1 < 24 & !c2, 2, 0)) %>%
+  mutate(Hour = Hour + r) %>% select(-c1, -c2, -r)
+
+#Dodanie dodatkowej obserwacji równej średniej z sąsiednich obserwacji podczas zmiany czasu zimowego na letni
+
+specialCases <- srcLoads %>% group_by(delivery_date) %>%
+  summarize(n = n(),
+            fctLoad = sum(if_else(Hour <= 3, 1, 0) * fctLoad/2),
+            actLoad = sum(if_else(Hour <= 3, 1, 0) * actLoad/2)) %>%
+  filter(n < 24) %>% select (-n) %>% mutate(Hour = 2L)
+
+srcLoads <- srcLoads %>% add_row(specialCases) %>% arrange(delivery_date, Hour)
+
+rm(temp, temp1, temp2, read_Loads, srcFiles, specialCases)
+
+```
+
+### Wstępna analiza
+
+Poziom i zmienność cen kontraktów godzinowych na przestrzeni ubiegłych trzech lat przedstawia poniższy wykres. Można zauważyć, że od połowy roku 2017 i przez cały rok 2018 znacznie częściej występowały obserwacje odstające. Ponadto ceny w roku 2017 były wyraźnie niższe niż w latach 2018 i 2019, w którym nastąpiła stabilizacja cen, rozumiana jako niewielki udział liczby godzin, dla których cena jest obserwacją odstającą i jej niższy niż w poprzednich latach poziom w relacji do mediany.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Ceny kontraktów godzinowych"}
+
+start_training <- ymd(20170101)
+end_training <- ymd(20191231)
+
+temp <- srcPrices %>% filter(trading_date >= start_training & trading_date <= end_training)
+
+temp %>% mutate(trading_dh = trading_date + hours(Hour - 1)) %>%
+  as_tsibble(index = trading_dh) %>%
+  gg_season(Price, period = "year") +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  xlab("Miesiąc dostawy") +
+  ylab("Kurs fixingu I (PLN/MWh)") +
+  scale_x_datetime(date_breaks = "1 month", date_labels = "%b")
+
+end_training <- ymd(20200331)
+
+```
+
+Kolejny wykres potwierdza wnioski, zaobserwowane wcześniej. Ze względu na to, że poszczególne lata różnią się między sobą poziomem i zmiennością cen, do modelowania statystycznego użyte zostaną dane z dwunastu miesięcy obrotu poprzedzających `r end_training` z tym dniem włącznie, natomiast sieć neuronowa, która wymaga wielu obserwacji do trenowania, uczona będzie na danych z okresu trzech lat. Modele testowane będą na danych od `r end_training + days(1)` do `r srcPrices %>% summarize(d = max(trading_date)) %>% pull()`.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Rozkład cen kontraktów godzinowych"}
+
+temp %>% mutate(Year = as_factor(year(trading_date))) %>%
+  ggplot(mapping = aes(x = Year, y = Price)) +
+  geom_boxplot() +
+  theme_minimal() +
+  xlab("Rok dostawy") +
+  ylab("Kurs fixingu I (PLN/MWh)")
+
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+shortDays <- function(input) {
+  
+  input %>%
+    str_replace_all("\\\\.", ".") %>% str_replace_all("niedz", "nd")
+}
+
+temp <- srcPrices %>%
+  left_join(srcLoads, by = c("trading_date" = "delivery_date", "Hour")) %>%
+  mutate(Hour = as_factor(Hour), Year = as_factor(year(trading_date)),
+         Day = wday(trading_date, label = TRUE, abbr = FALSE, week_start = 1,
+                    locale = "Polish"),
+         Day_abbr = fct_relabel(wday(trading_date, label = TRUE, abbr = TRUE,
+                                     week_start = 1, locale = "Polish"), ~ shortDays(.)),
+         Month = month(trading_date, label = TRUE, locale = "Polish"))
+
+start_training <- ymd(20170101)
+end_training <- ymd(20191231)
+
+temp_long <- temp %>% filter(trading_date >= start_training & trading_date <= end_training)
+
+start_training <- ymd(20190401)
+end_training <- ymd(20200331)
+
+temp <- temp %>% filter(trading_date >= start_training & trading_date <= end_training)
+
+```
+
+W dalszej części analizy wstępnej badany będzie okres trzech pełnych lat kalendarzowych od 2017 do 2019 roku oraz okres od `r start_training` do `r end_training`, który stanowić będzie zbiór uczący dla modeli statystycznych.
+
+Ceny kontraktów godzinowych na energię elektryczną w zbiorze uczącym (wykres \@ref(fig:miesiace)) charakteryzują się sezonowością miesięczną, tygodniową oraz dobową. Najwyższe ceny występują w miesiącach obowiązywania czasu letniego, od kwietnia do października. W tym okresie, częściej niż w pozostałych miesiącach roku, pojawiały się obserwacje odstające, co może mieć związek z letnimi warunkami atmosferycznymi, wpływającymi zarówno na podaż jak i popyt na energię elektryczną.
+
+Wyjątkowy na tym tle był rok 2018, kiedy hurtowe ceny energii elektrycznej w Polsce gwałtownie wzrosły w okresie jesiennym (wykres \@ref(fig:lata-miesiace)), osiągając najwyższe poziomy od 2010 roku, które były o około 80% wyższe niż w okresie 2010-2017. Wzrost ten miał fundamentalne przyczyny, do których w pierwszej kolejności należy zaliczyć rosnące ceny pozwoleń na emisję CO~2~ oraz węgla [@ksceewp].
+
+```{r lata-miesiace, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Miesięczny rozkład cen kontraktów godzinowych w poprzednich latach"}
+
+temp_long %>% mutate(Month_num = as_factor(month(trading_date))) %>%
+  ggplot() +
+  geom_boxplot(mapping = aes(x = Month, y = Price, group = Month_num)) +
+  theme_minimal() +
+  xlab("Miesiąc dostawy") +
+  ylab("Kurs fixingu I (PLN/MWh)") +
+  scale_x_discrete(breaks = c("sty", "kwi", "lip", "paź")) +
+  facet_wrap(vars(Year))
+
+```
+
+
+```{r miesiace, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Miesięczny rozkład cen kontraktów godzinowych w zbiorze uczącym"}
+
+temp %>%
+  ggplot() +
+  geom_boxplot(mapping = aes(x = Month, y = Price)) +
+  theme_minimal() +
+  xlab("Miesiąc dostawy") +
+  ylab("Kurs fixingu I (PLN/MWh)")
+
+```
+
+Dniem tygodnia, w którym można zauważyć spadek średnich cen kontraktów godzinowych na energię elektryczną jest sobota (wykres \@ref(fig:lata-dni)). Jest to również jedyny dzień tygodnia, w którym nie odnotowano obserwacji odstającym w zbiorze uczącym (wykres \@ref(fig:dni)).
+
+```{r lata-dni, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Tygodniowy rozkład cen kontraktów godzinowych w poprzednich latach"}
+
+temp_long %>%
+  ggplot() +
+  geom_boxplot(mapping = aes(x = Day_abbr, y = Price)) +
+  theme_minimal() +
+  xlab("Dzień dostawy") +
+  ylab("Kurs fixingu I (PLN/MWh)") +
+  facet_wrap(vars(Year))
+
+```
+
+```{r dni, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Tygodniowy rozkład cen kontraktów godzinowych w zbiorze uczącym"}
+
+temp %>%
+  ggplot() +
+  geom_boxplot(mapping = aes(x = Day, y = Price)) +
+  theme_minimal() +
+  xlab("Dzień dostawy") +
+  ylab("Kurs fixingu I (PLN/MWh)")
+
+```
+
+W ciągu doby, analizując średnie ceny kontraktów godzinowych (wykres \@ref(fig:godziny)), można wyróżnić cztery okresy. Średnie ceny kontraktów z godzinami dostawy pomiędzy 10 a 14 (okres szczytowy) są najwyższe i charakteryzują się podobnym rozrzutem. Średnie ceny kontraktów z godzinami dostawy pomiędzy 15 a 21 są nieznacznie niższe niż w szczytowym okresie a ich rozrzut maleje wraz z każdą kolejną godziną. Pora nocna, wyznaczona przedziałem godzin dostawy od 22 do 6 to okres najniższych cen energii elektrycznej w ciągu doby, których mediana z każdą kolejną godziną jest coraz niższa aż do godziny 6, kiedy następuje odbicie i zmiana dobowego trendu. W godzinach dostawy od 7 do 9 następuje relatywnie szybki wzrost cen, by ponownie osiągnąć wartości szczytowe od godziny 10.
+
+```{r lata-godziny, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Dobowy rozkład cen kontraktów godzinowych w poprzednich latach"}
+
+temp_long %>%
+  ggplot() +
+  geom_boxplot(mapping = aes(x = Hour, y = Price)) +
+  theme_minimal() +
+  xlab("Godzina dostawy") +
+  ylab("Kurs fixingu I (PLN/MWh)") +
+  scale_x_discrete(breaks = seq(from = 1, to = 24, by = 3)) +
+  facet_wrap(vars(Year))
+
+```
+
+```{r godziny, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Dobowy rozkład cen kontraktów godzinowych w zbiorze uczącym"}
+
+temp %>%
+  ggplot() +
+  geom_boxplot(mapping = aes(x = Hour, y = Price)) +
+  theme_minimal() +
+  xlab("Godzina dostawy") +
+  ylab("Kurs fixingu I (PLN/MWh)")
+
+```
+
+Analiza cen kontraktów w podziale na godziny oraz dni tygodnia potwierdza wcześniejsze obserwacje. Można również zaobserwować (wykres \@ref(fig:dni-godziny)), że w soboty ceny rosną dopiero od godziny 8, podczas gdy w pozostałe dni tygodnia wzrost cen zaczyna się już o godzinie 7. Ponadto, we wszystkie dni tygodnia, z wyjątkiem piątku i soboty, począwszy od 2019 roku, można zauważyć nieznaczny wzrost cen energii o godzinie 23 (wykres \@ref(fig:lata-dni-godziny)).
+
+```{r lata-dni-godziny, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Godzinowy rozkład cen kontraktów w podziale na dni tygodnia w poprzednich latach"}
+
+temp_long %>%
+  ggplot(mapping = aes(x = Hour, y = Price, color = Day, group = Day)) +
+  stat_summary(fun = "median", geom = "point") +
+  stat_summary(fun = "median", geom = "line") +
+  theme_minimal() +
+  xlab("Godzina dostawy") +
+  ylab("Mediana kursu fixingu I (PLN/MWh)") +
+  labs(color = "Dzień") +
+  theme(legend.position = "bottom") +
+  scale_x_discrete(breaks = seq(from = 1, to = 24, by = 3)) +
+  facet_wrap(vars(Year))
+
+```
+
+```{r dni-godziny, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Godzinowy rozkład cen kontraktów w podziale na dni tygodnia w zbiorze uczącym"}
+
+temp %>%
+  ggplot(mapping = aes(x = Hour, y = Price, color = Day, group = Day)) +
+  stat_summary(fun = "median", geom = "point") +
+  stat_summary(fun = "median", geom = "line") +
+  theme_minimal() +
+  xlab("Godzina dostawy") +
+  ylab("Mediana kurs fixingu I (PLN/MWh)") +
+  labs(color = "Dzień")
+
+```
+
+Ekonomicznie uzasadnione wydaje się założenie, że ceny energii elektrycznej powinny zależeć od zapotrzebowania mocy. Na poniższym wykresie widoczna jest zależność liniowa kursu od prognozowanego zapotrzebowania mocy, oszacowana regresją liniową, która pokazuje, że wraz ze wzrostem zapotrzebowania rośnie także cena, ale duży rozrzut ceny dla dowolnie wybranej wartości zapotrzebowania sugeruje, że cena zależy również od wielu innych czynników. Korelacja pomiędzy ceną a zapotrzebowaniem jest słaba i wynosi `r format(cor(temp$Price, temp$fctLoad, method = "pearson"), digits = 2)`. Pomimo tego, prognozowane zapotrzebowanie mocy będzie użyte jako zmienna objaśniająca w modelach.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Zależność ceny kontraktu od zapotrzebowania mocy"}
+
+ggplot(temp, mapping = aes(x = fctLoad, y = Price)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm") +
+  theme_minimal() +
+  xlab("Prognozowane zapotrzebowanie mocy (MW)") +
+  ylab("Kurs fixingu I (PLN/MWh)")
+
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+temp1 <- temp %>%
+  as_tibble() %>% group_by(Hour) %>% summarize(avgLoad = mean(actLoad)) %>%
+  filter(avgLoad == min(avgLoad) | avgLoad == max(avgLoad))
+
+temp_diff <- temp
+
+```
+
+W danym dniu, podczas określania kursu jednolitego, ustalane są dwadzieścia cztery ceny kontraktów na każdą godzinę dostawy dnia następnego. W związku z tym ceny kontraktów na daną godzinę doby można potraktować jako szereg czasowy o odstępie równym jednej dobie. W różnych porach dnia zapotrzebowanie mocy waha się w zależności od intensywności działalności gospodarczej i czynników atmosferycznych (wzrost temperatury w ciągu dnia). Najwyższe zapotrzebowanie mocy w badanym okresie odnotowano o godzinie `r temp1[2,1]`, a najniższe o godzinie `r temp1[1,1]`. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Ceny kontraktów dla wybranych godzin"}
+
+temp <- temp1 %>%
+  inner_join(temp, by = "Hour") %>% as_tsibble(key = Hour, index = trading_date)
+
+temp %>% autoplot(Price) +
+  theme_minimal() +
+  xlab("Data obrotu") +
+  ylab("Kurs fixingu I (PLN/MWh)") +
+  theme(legend.position = "bottom") +
+  guides(color = guide_legend(title = "Godzina dostawy"))
+
+```
+
+Średnia cena dla godziny 4 wynosi `r srcPrices %>% filter(Hour == 4) %>% summarize(mean(Price)) %>% pull() %>% round(digits = 2)` PLN i jest nisza od średniej dla godziny 13, która wynosi `r srcPrices %>% filter(Hour == 13) %>% summarize(mean(Price)) %>% pull() %>% round(digits = 2)` PLN. Odchylenia standardowe wynoszą odpowiednio `r srcPrices %>% filter(Hour == 4) %>% summarize(sd(Price)) %>% pull() %>% round(digits = 2)` i `r srcPrices %>% filter(Hour == 13) %>% summarize(sd(Price)) %>% pull() %>% round(digits = 2)`, co jest zgodne z wcześniejszymi obserwacjami, dotyczącymi kształtowania się cen w ciągu doby.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Rozkład tygodniowy cen kontraktów dla wybranych godzin"}
+
+temp %>% gg_subseries(Price, period = "week") + theme_minimal() +
+  xlab("Data obrotu") +
+  ylab("Kurs fixingu I (PLN/MWh)") +
+  scale_x_date(date_breaks = "6 months", date_labels = "%b")
+
+```
+
+Wykres szeregów dla tych dwóch godzin, oprócz omawianej sezonowości tygodniowej wskazuje również na występowanie trendu spadkowego w analizowanym okresie lub sezonowości rocznej. Analiza tego zjawiska dla wcześniejszych okresów sugeruje raczej, że jest to sezonowość roczna niż trend spadkowy. We wcześniejszych latach ceny rosły, zatem przy formułowaniu modeli statystycznych trend i sezonowość roczna zostaną pominięte.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Dekompozycja wybranych szeregów czasowych", fig.width = 6, fig.height=5}
+
+dcmp <- temp %>% rename(cena = Price) %>% model(STL(cena)) %>% components()
+
+dcmp <- dcmp %>% rename(sezonowość = season_week, reszta = remainder) %>%
+  as_dable(response = cena, method = attr(dcmp, "method"),
+           aliases = list(cena = str2lang("trend + sezonowość + reszta"),
+                          season_adjust = str2lang("trend + reszta")))
+
+dcmp %>% autoplot() +
+  theme_minimal() +
+  ggtitle("") +
+  xlab("Data obrotu") +
+  theme(legend.position = "bottom") +
+  guides(color = guide_legend(title = "Godzina dostawy")) +
+  labs(subtitle = "cena = trend + sezonowość tygodniowa + reszta")
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Wybrane szeregi po usunięciu efektów sezonowości"}
+
+temp %>% autoplot(Price, color = "grey") +
+  autolayer(dcmp, trend) +
+  theme_minimal() +
+  xlab("Data obrotu") +
+  ylab("Kurs fixingu I (PLN/MWh)") +
+  theme(legend.position = "bottom") +
+  guides(color = guide_legend(title = "Godzina dostawy"))
+
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+rm(temp, temp_long, shortDays, temp1, dcmp)
+gc()
+
+```
+
+### Przygotowanie danych do modelowania
+
+Przed przystąpieniem do budowy modeli konieczne jest przygotowanie danych. Oprócz opisanych wcześniej przekształceń, polegających na usunięciu nadmiarowych obserwacji lub uzupełnieniu braków danych w przypadku dni, w których następuje zmiana czasu, zaobserwowane podczas wstępnej analizy różne rodzaje sezonowości zostały odzwierciedlone w zmiennych utworzonych metodą kodowania gorącej jedynki, w szczególności wprowadzono zmienne identyfikujące miesiąc roku, dzień tygodnia oraz godzinę dostawy, które zostaną wykorzystane w trenowaniu modeli.
+Modele zbudowane na szeregach o odstępach równych jednej dobie dla każdej godziny osobno nie zawierają w sobie żadnych informacji o cenach kontraktów w pozostałych godzinach doby. W związku z tym przygotowane zostały zmienne pomocnicze dla regresji liniowej i modeli klasy ARIMAX, w szczególności zmienne zawierające ceny z poprzedzających daną obserwację dwudziestu trzech godzin dostawy oraz zmienne zawierające kursy jednolite z poprzedniego dnia. Ponadto do modelu regresji liniowej wprowadzona zostanie zmienna, informująca o cenie kontraktu w danej godzinie sprzed tygodnia.
+
+W zbiorze, wykorzystanym  do uczenia sieci neuronowej, wszystkie zmienne numeryczne zostały znormalizowane standaryzacją $Z$ do przedziału $[-1, 1]$, aby ceny kontraktów wyrażone w złotych i wahające się od `r format(round(min(srcPrices$Price)), big.mark = "")` do `r format(round(max(srcPrices$Price)), big.mark = "")` oraz informacje o zapotrzebowaniu mocy, wyrażone w megawatach i przyjmujące wartości od `r format(round(min(srcLoads$actLoad)), big.mark = "")` do `r format(round(max(srcLoads$actLoad)), big.mark = "")`, sprowadzić do jednakowej skali, co zapewnia poprawne działanie algorytmu optymalizacji gradientowej.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+# Funkcja przygotowująca dane do modelowania
+
+prepareData <- function(first_point, scaling, previous_day_statistics, lagged_prices) {
+  
+  srcData <- srcPrices %>% select(-delivery_date) %>%
+    left_join(srcLoads, by = c("trading_date" = "delivery_date", "Hour"))
+
+  mData <- srcData %>% filter(trading_date >= first_point - days(7))
+
+#skalowanie
+  
+  if(scaling == TRUE) {
+    temp <- srcData %>%
+      filter(trading_date >= first_point & trading_date <= end_training) %>%
+      select(ends_with("Price"), ends_with("Load"))
+    adjustments <- bind_rows(Mean = map_dfr(temp, mean),
+                             SD = map_dfr(temp, sd), .id = "id")
+  
+    temp <- mData %>%
+      select(ends_with("Price"), ends_with("Load"))
+  
+    temp_mean <- adjustments %>% filter(id == "Mean") %>% select(-id)
+    temp_sd <- adjustments %>% filter(id == "SD") %>% select(-id)
+    scaled <- temp %>% scale(center = temp_mean, scale = temp_sd) %>% as_tibble()
+    
+    mData <- bind_cols(select(mData, trading_date, Hour), scaled)
+  } else
+    adjustments <- NULL
+  
+#Dodatkowe metryki
+
+  temp <- mData %>% mutate(delivery_date = trading_date + days(1)) %>%
+    select(delivery_date, Price)
+
+  statPrices <- temp %>% group_by(delivery_date)
+  if(previous_day_statistics == TRUE) {
+    statPrices <- statPrices %>%
+      summarize(maxPrice = max(Price), minPrice = min(Price), avgPrice = mean(Price))
+  } else
+    statPrices <- statPrices %>% select(-Price) %>% distinct()
+
+  weekDays <- temp %>% distinct(delivery_date) %>%
+    mutate(weekday = wday(delivery_date, label = TRUE, week_start = 1, locale = "English"))
+
+  Months <- temp %>% distinct(delivery_date) %>%
+    mutate(month = month(delivery_date, label = TRUE, locale = "English"))
+
+  if(lagged_prices == TRUE) {
+    lagPrices <- matrix(NA, nrow(mData), 24 - 1)
+    n <- character(24 - 1)
+    for (i in 1:(24 - 1)) {
+      lagPrices[,i] <- lag(mData$Price, i)
+      n[i] <- str_c("lPrice", i)
+    }
+    colnames(lagPrices) <- n
+    
+    mData <- bind_cols(mData, as_tibble(lagPrices)) %>%
+      arrange(trading_date, Hour) %>%
+      mutate(sPrice1 = lag(Price, 24), sPrice7 = lag(Price, 24 * 7))
+  } else
+    lagPrices <- NULL
+
+#
+  temp <- srcPrices %>% select(-trading_date) %>%
+    pivot_wider(names_from = Hour, names_prefix = "pPrice", values_from = Price)
+
+  mData <- mData %>%
+    left_join(temp, by = c("trading_date" = "delivery_date"))
+#
+
+  temp <- statPrices %>% left_join(weekDays, by = "delivery_date") %>%
+    dummy_cols(select_columns = "weekday", remove_first_dummy = TRUE,
+             ignore_na = TRUE, remove_selected_columns = TRUE) %>%
+  left_join(Months, by = "delivery_date") %>%
+  dummy_cols(select_columns = "month", remove_first_dummy = TRUE,
+             ignore_na = TRUE, remove_selected_columns = TRUE) %>%
+  arrange(delivery_date)
+
+  mData <- mData %>% filter(trading_date >= first_point) %>%
+    left_join(temp, by = c("trading_date" = "delivery_date")) %>%
+    tsibble(key = Hour, index = trading_date)
+  
+  list(data = mData, adjustments = adjustments)
+}
+
+rescale <- function(x, .resid = FALSE) {
+  
+  if(is.null(adjustments))
+    x
+  else {
+    if(.resid == FALSE)
+      trMean <- adjustments %>% filter(id == "Mean") %>% select("Price") %>% pull()
+    else
+      trMean <- 0
+    trSD <- adjustments %>% filter(id == "SD") %>% select("Price") %>% pull()
+    
+    x * trSD + trMean
+  }
+}
+
+removeOutliers <- function(input) {
+  
+  Q <- quantile(input$Price, probs=c(0.25, 0.75), na.rm = FALSE)
+  iqr <- IQR(input$Price)
+  top <-  Q["75%"] + 1.5 * iqr
+  bottom <- Q["25%"] - 1.5 * iqr
+  input %>%
+    mutate(Price = if_else(Price > top, top, if_else(Price < bottom, bottom, Price)))
+}
+
+temp <- prepareData(start_training,
+                    scaling = FALSE,
+                    previous_day_statistics = TRUE, lagged_prices = TRUE)
+
+mData <- temp$data
+adjustments <- temp$adjustments
+
+rm(temp)
+
+```
+
+### Model ARIMA dla szeregu czasowego o odstępie równym jednej godzinie
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+start_training <- ymd(20190401)
+end_training <- ymd(20200331)
+start_testing <- end_training + days(1)
+end_testing <- NULL
+
+mData_h <- as_tibble(mData) %>% mutate(trading_dh = trading_date + hours(Hour - 1)) %>%
+  select(trading_dh, everything(), -trading_date) %>% as_tsibble(index = trading_dh)
+
+training_h <- mData_h %>%
+  filter(trading_dh >= start_training & trading_dh < start_testing) %>% removeOutliers()
+testing_h <- mData_h %>% filter(trading_dh >= start_testing)
+
+```
+
+Model zbudowano na danych, zawierających ceny kontraktów od `r start_training` do `r end_training`. Szereg czasowy cen kontraktów godzinowych jest niestacjonarny oraz sezonowy. Wykres autokorelacji (ACF) potwierdza występowanie sezonowości dobowej.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Diagnostyka szeregu czasowego o odstępie równym jednej godzinie"}
+
+formatPlots <- function(input, y1, x3, y3) {
+  
+  for(i in 1:3) {
+    input[[i]] <- input[[i]] + theme_minimal()
+  }
+  
+  input[[1]] <- input[[1]] + xlab("Godzina dostawy") + ylab(y1) +
+    geom_line(color = "grey") + geom_point(alpha = 0.5)
+  input[[2]] <- input[[2]] + xlab("Opóźnienie [1h]") + ylab("Autokorelacja (ACF)")
+  input[[3]] <- input[[3]] + xlab(x3) + ylab(y3)
+  
+  pushViewport(viewport(layout = grid.layout(2, 2)))
+  
+  input
+}
+
+training_h %>% gg_tsdisplay(Price, plot_type = "partial", lag_max = 5*24 - 1) %>%
+  formatPlots(y1 = "Kurs fixingu I (PLN)",
+              x3 = "Opóźnienie [1h]",
+              y3 = "Częściowa autokorelacja")
+
+```
+
+W związku z powyższym dokonane zostanie jednokrotne różnicowanie sezonowe o opóźnieniu równym dwudziestu czterem godzinom oraz jednokrotne różnicowanie regularne. Poniższy wykres przedstawia diagnostykę szeregu czasowego po dokonaniu różnicowań.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Diagnostyka szeregu czasowego o odstępie równym jednej godzinie po jednokrotnym różnicowaniu sezonowym i jednokrotnym różnicowaniu regularnym"}
+
+training_h_d <- training_h %>% mutate(Price = difference(Price, 24)) %>%
+  mutate(Price = difference(Price))
+
+training_h_d %>% gg_tsdisplay(Price, plot_type = "partial", lag_max = 5*24 - 1) %>%
+  formatPlots(y1 = "Kurs fixingu I (PLN)",
+              x3 = "Opóźnienie [1h]",
+              y3 = "Częściowa autokorelacja")
+
+rm(training_h_d)
+
+```
+
+Wykres autokorelacji oraz częściowej autokorelacji sugerują wartości parametrów $P = 4$ oraz $Q = 2$. Zatem potencjalny model ma postać $ARIMA(0, 1, 0)\times(4, 1, 2)_24$ (w dalszej części tekstu oznaczony jako `mARIMA1`).
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+plan("multisession")
+
+arModel_h1 <- training_h %>% model(mARIMA = ARIMA(Price ~ pdq(0,1,0) + PDQ(4,1,2) + 0))
+arModel_h2 <- training_h %>% model(mARIMA = ARIMA(Price, stepwise = FALSE))
+arModel_h3 <- training_h %>%
+  model(mARIMA = ARIMA(Price ~ pdq(1,0,2) + PDQ(4,1,2) + 0,
+                       order_constraint = p + q + P + Q <= 9 & (!constant | d + D < 2)))
+
+plan("sequential")
+
+```
+
+Współczynniki modelu `mARIMA1` wraz z wartościami testu, badającego ich istotność przedstawia tabela poniżej. Wartości `p` dla wszystkich zmiennych objaśniających są mniejsze od `0.05`.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+tableTerms <- function(input) {
+  
+  input %>% tidy() %>% select(-.model) %>%
+    rename(Współczynnik = term, Oszacowanie = estimate, "Błąd standardowy" = std.error,
+           Statystyka = statistic, "Wartość p" = p.value)
+}
+
+arModel_h1 %>% tableTerms %>%
+  kable(caption = "Współczynniki modelu ARIMA z ręcznie wybranymi parametrami")
+
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+temp <- arModel_h2 %>%
+  mutate(pdq = map(mARIMA, c("fit", "spec"))) %>% 
+  unnest(pdq)
+
+```
+
+Funkcja automatycznego wyboru optymalnych parametrów modelu, oparta o algorytm Hyndmana-Khandakara, sugeruje model $ARIMA(`r temp$p`, `r temp$d`, `r temp$q`)\times(`r temp$P`, `r temp$D`, `r temp$Q`)_`r temp$period`$ (w dalszej części tekstu oznaczony jako `mARIMA2`). Zastosowany algorytm poszukuje takich parametrów $p$, $q$, $P$, $Q$, które minimalizują kryterium informacyjne AICc spośród wszystkich modeli zintegrowanych w tym samym stopniu. Stopień integracji szeregu jest ustalany przy wielokrotnym wykorzystaniu testu KPSS [@fpap]. 
+
+Znaleziony model jest zintegrowany w stopniu $d = `r temp$d`$ i $D = `r temp$D`$ i wartość kryterium informacyjnego AICc dla tego modelu wynosi `r arModel_h2 %>% glance() %>% pull(AICc) %>% round(digits = 2)`.
+
+Współczynniki modelu `mARIMA2` wraz z wartościami testu, badającego ich istotność przedstawia tabela poniżej. Wartości `p` dla wszystkich zmiennych objaśniających są mniejsze od `0.05`.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+arModel_h2 %>% tableTerms() %>%
+  kable(caption = "Współczynniki modelu ARIMA z automatycznie wybranymi parametrami")
+
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+temp <- arModel_h3 %>%
+  mutate(pdq = map(mARIMA, c("fit", "spec"))) %>% 
+  unnest(pdq)
+
+```
+
+Do porównania został użyty również model $ARIMA(`r temp$p`, `r temp$d`, `r temp$q`)\times(`r temp$P`, `r temp$D`, `r temp$Q`)_`r temp$period`$ (w dalszej części tekstu oznaczony jako `mARIMA3`), który w pewnym sensie łączy wiedzę z obu wcześniejszych modeli. Jest on zintegrowany w tym samym stopniu co model zbudowany automatycznie, dzięki czemu jest możliwe porównanie kryterium informacyjnego AICc w celu dokonania wyboru lepszego modelu.
+
+Współczynniki modelu wraz z wartościami testu, badającego ich istotność przedstawia tabela poniżej. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+arModel_h3 %>% tableTerms() %>%
+  kable(caption = "Współczynniki modelu ARIMA ze zmodyfikowanymi parametrami")
+
+```
+
+Wartość kryterium informacyjnego AICc dla modelu `mARIMA3` wynosi `r arModel_h3 %>% glance() %>% pull(AICc) %>% round(digits = 2)` i jest niższa od wartości dla modelu z parametrami wybranymi automatycznie `mARIMA2`, co wskazuje, że model `mARIMA3` jest preferowany względem `mARIMA2`. 
+
+Szeregi czasowe reszt z analizowanych modeli charakteryzują się podobnymi właściwościami. W związku z tym, w dalszej części tekstu szczegółowo opisana zostanie jedynie diagnostyka modelu `mARIMA1`.
+
+Wykresy poniżej przedstawiają szereg czasowy reszt z modelu `mARIMA1`, autokorelację pomiędzy kolejnymi opóźnieniami oraz rozkład wartości reszt. Dobry model charakteryzuje normalny rozkład tych wartości, brak autokorelacji oraz szereg czasowy reszt, który ma własności białego szumu (brak regularnych wzorców oraz jednorodna wariancja w całym okresie).
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Diagnostyka modelu mARIMA1"}
+
+arModel_h1 %>% gg_tsresiduals(lag_max = 5*24 - 1) %>%
+  formatPlots(y1 = "Reszta", x3 = "Reszta", y3 = "Liczba obserwacji")
+
+```
+
+Z wykresów diagnostycznych można wywnioskować, że znaleziony model nie posiada pożądanych własności statystycznych. Mimo, że na wykresie reszt nie ma widocznych regularnych wzorców ani niejednorodności wariancji, histogram rozkładu reszt ma kształt bardziej wyostrzony niż rozkład normalny oraz występuje autokorelacja reszt dla kilku opóźnień, co sugeruje, że w danych nadal są pewne zależności niewyjaśnione przez model.
+
+Wykres kwantylowy wskazuje na odstępstwa od rozkładu normalnego.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Wykres kwantylowy reszt modelu mARIMA1"}
+
+arModel_h1 %>% residuals() %>% as_tibble() %>%
+  ggplot(mapping = aes(sample = .resid)) +
+  stat_qq() + stat_qq_line() +
+  theme_minimal() +
+  xlab("Wartości teoretyczne") +
+  ylab("Próbka")
+
+```
+
+Aby formalnie zweryfikować zgodność rozkładu reszt z rozkładem normalnym przeprowadzony został test Shapiro-Wilka.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+temp <- arModel_h1 %>% residuals() %>% as_tibble() %>% select(.resid)
+.resid <- sample(temp$.resid, min(c(5000, nrow(temp))))
+
+t <- shapiro.test(.resid)
+rm(.resid)
+
+```
+
+Wartość statystyki $W = `r format(t$statistic, digit = 2)`$ oraz wartość $p = `r round(t$p.value, digits = 2)` < 0.05$ każą odrzucić hipotezę o zgodności rozkładu reszt z rozkładem normalnym.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+arModel_h1 %>% tidy() %>% nrow() -> p
+l <- 5*24 - 1
+
+t <- arModel_h1 %>% augment() %>%
+  features(.resid, ljung_box, lag = l, dof = l - p)
+
+```
+
+Do zbadania losowości reszt wykorzystany został test Ljung-Boxa dla `r l` opóźnień, co uwzględniając liczbę parametrów modelu, daje `r l - p` stopni swobody.
+
+Wartość statystyki $Q = `r format(pull(t, lb_stat), digit = 5)`$ oraz wartość $p = `r round(pull(t, lb_pvalue), digits = 2)` < 0.05$ każą odrzucić hipotezę o losowości reszt.
+
+Godzinowe modele ARIMA, w tym model, którego parametry zostały wybrane automatycznie, nie uwzględniły wszystkich zależności, które można zaobserwować w danych. W szczególności uwzględniona została tylko sezonowość dobowa, a sezonowość tygodniowa została przez te modele zignorowana (co wynika wprost z ich ograniczeń konstrukcyjnych, umożliwiających uwzględnienie tylko jednego rodzaju sezonowości).
+
+Mając w świadomości brak pożądanych własności statystycznych, modeli użyto do wyliczenia prognoz dwudziestu czterech cen kontraktów godzinowych dla każdej doby zbioru testowego i porównano do metody naiwnej (`NAIVE1`), która zakłada, że cena kontraktu na daną godzinę dostawy jest równa cenie kontraktu na tą godzinę z poprzedniego dnia oraz alternatywnej metody naiwnej (`NAIVE7`) zakładającej, że cena kontraktu na daną godzinę jest równa cenie kontraktu na tą godzinę z tego samego dnia z poprzedniego tygodnia.
+
+Z każdą kolejną godziną prognoza powinna być coraz bardziej niepewna, ze względu na to, że jest to prognoza modelu w coraz bardziej odległym horyzoncie czasowym.
+
+Poniższy wykres przedstawia średni błąd bezwzględny (MAE) w zbiorze testowym w zależności od godziny dostawy dla modeli ARIMA oraz metod naiwnych.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+getNaiveForecast_h <- function(d = 1) {
+  
+  lookback <- 24 * d
+  last <- mData_h %>%
+    filter(trading_dh >= start_training & trading_dh < start_testing) %>%
+    arrange(trading_dh) %>% tail(lookback) %>% as_tibble()
+  
+  t <- str_c("NAIVE", d)
+  
+  p <- str_c("fctPrice_", t)
+  r <- str_c("resid_", t)
+  
+  bind_rows(last, as_tibble(testing_h)) %>% arrange(trading_dh) %>%
+    mutate(!!p := lag(Price, lookback), !!r := Price - eval(sym(p))) %>%
+    filter(!is.na(eval(sym(p)))) %>% select(!!p, !!r)
+}
+
+getARIMAForecast_h <- function(models, j) {
+
+  t_model <- models[[j]]
+  t_fct <- NULL
+  t_data <- testing_h %>% filter(hour(trading_dh) == 23)
+  
+  for(i in 1:(nrow(t_data))) {
+    t_fct <- bind_rows(t_fct, forecast(t_model, h = 24))
+    t_model <- models[[j]] %>%
+      refit(filter(mData_h, trading_dh <= pull(t_data[i,], trading_dh)))
+  }
+  
+  fct_var <- str_c("fctPrice_mARIMA", j)
+  resid_var <- str_c("resid_mARIMA", j)
+  
+  t_fct <- t_fct %>% as_tibble() %>% select(-Price) %>%
+    left_join(testing_h, by = "trading_dh") %>%
+    mutate(!!fct_var := .mean, !!resid_var := Price - .mean) %>%
+    select(trading_dh, !!fct_var, !!resid_var)
+}
+
+t_naive1 <- getNaiveForecast_h(1)
+t_naive7 <- getNaiveForecast_h(7)
+
+m <- list(arModel_h1, arModel_h2, arModel_h3)
+
+for(i in 1:3) {
+  if(i == 1)
+    t_fct <- getARIMAForecast_h(m, i)    
+  else
+    t_fct <- t_fct %>% left_join(getARIMAForecast_h(m, i), by = "trading_dh")
+}
+
+rm(m)
+
+resARIMA <- bind_cols(t_fct, t_naive1, t_naive7) %>%
+  mutate(Hour = hour(trading_dh) + 1) %>% select(Hour, starts_with("resid")) %>%
+  pivot_longer(starts_with("resid")) %>%
+  group_by(Hour, name) %>%
+  summarize(value = mean(abs(value))) %>%
+  mutate(name = str_replace(name, "resid_", ""), value = rescale(value, .resid = TRUE))
+
+tableMAE <- function(input) {
+  
+  input %>% group_by(name) %>%
+    summarize(MAE = round(mean(value), digits = 2)) %>%
+    rename(model = name)
+}
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Średni błąd bezwzględny (MAE) w zbiorze testowym w zależności od godziny dostawy"}
+
+plotMAE_h <- function(input) {
+  
+  ggplot(input, mapping = aes(x = as_factor(Hour), y = value, color = name)) +
+    geom_point() +
+    geom_line(mapping = aes(group = name)) +
+    theme_minimal() +
+    theme(legend.position = "bottom") +
+    xlab("Godzina dostawy") +
+    ylab("Średni błąd bezwzględny (MAE)") +
+    labs(color = "Model")
+}
+
+resARIMA %>% plotMAE_h()
+
+```
+
+Łączny średni błąd bezwzględny (MAE) dla poszczególnych modeli ARIMA przedstawiono w tabeli poniżej.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+resARIMA %>% tableMAE() %>%
+  kable(caption = "Łączny średni błąd bezwzględny (MAE) w zbiorze testowym dla modeli ARIMA")
+
+```
+
+Metoda naiwna `NAIVE1` oraz modele ARIMA do wyliczenia prognozy korzystają z ceny dla danej godziny z dnia poprzedniego, niezależnie od dnia tygodnia. Taka konstrukcja prognozy powoduje, że największy średni błąd bezwzględny występuje dla godziny 7. Przyczyną tego jest to, że dla wszystkich dni tygodnia z wyjątkiem soboty ceny zaczynają rosnąć już od godziny 7, natomiast w sobotę dopiero od godziny 8 (wykres \@ref(fig:dni-godziny)). Gdy porówna się mediany cen w poszczególnych godzinach doby dla soboty i pozostałych dni tygodnia to największą różnicę można zaobserwować dla godziny 7, co bezpośrednio przekłada się na błąd prognozy w metodzie naiwnej `NAIVE1` oraz w modelu ARIMA. Odwrotna sytuacja występuje o godzinie 22, co do pewnego stopnia tłumaczy spadek błędu MAE o tej godzinie. W metodzie naiwnej `NAIVE7`, która opiera się na cenie dla danej godziny sprzed tygodnia, uwzględniając w ten sposób sezonowość tygodniową, to zjawisko o godzinie 7 nie występuje, ponieważ prognozy cen są porównywane z faktycznymi cenami dla danego dnia, więc różnice pomiędzy dniami tygodnia nie mają żadnego wpływ na błąd prognozy.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Różnica bezwzględna pomiędzy medianą cen w sobotę a w pozostałe dni tygodnia w zależności od godziny dostawy"}
+
+temp_diff %>% mutate(Day_group = if_else(Day_abbr == "sob.", "sob", "poz")) %>%
+  group_by(Hour, Day_group) %>% summarize(medPrice = median(Price)) %>%
+  pivot_wider(names_from = Day_group, values_from = medPrice) %>%
+  mutate(dmPrice = abs(poz - sob)) %>%
+  ggplot() +
+  geom_col(mapping = aes(x = Hour, y = dmPrice), fill = "#29568F") +
+  theme_minimal() +
+  xlab("Godzina dostawy") +
+  ylab("Różnica bezwzględna pomiędzy medianą cen (PLN)")
+
+```
+
+Modele `mARIMA1` i `mARIMA2` nie osiągnęły zadowalających rezultatów, natomiast prognozy modelu `mARIMA3` można uznać za umiarkowanie zadowalające. Jednym z powodów jest złożoność szeregu czasowego, w szczególności występowanie sezonowości o kilku okresach. Model uwzględnił jedynie sezonowość dobową, ponieważ formuła modelu umożliwia uwzględnienie tylko jednego rodzaju sezonowości. W związku z tym konieczna jest taka konstrukcja modelu prognostycznego, która weźmie pod uwagę również występowanie sezonowości tygodniowej.
+
+### Modele dla szeregów czasowych o odstępie równym jednej dobie
+
+Złożony charakter sezonowości występującej w szeregu czasowym sugeruje jego dekompozycję na dwadzieścia cztery podszeregi dla każdej godziny dostawy osobno, o odstępie równym jednej dobie i zbudowanie oddzielnego modelu na każdym takim podszeregu.
+
+Jednakże taki podział powoduje, że z każdego szeregu dla danej godziny dostawy znika informacja,  którą zawierają ceny z pozostałych godzin doby.  Na przykład szereg dla godziny dziesiątej jako ostatnią dostępną informację zawiera cenę dla godziny dziesiątej z poprzedniego dnia, natomiast nie ma dostępu do informacji o cenach z godzin pomiędzy tymi dwoma punktami w czasie. Brak tej dodatkowej informacji może znacząco utrudnić zbudowanie modelu, który ma za zadanie osiągnąć lepsze wyniki, w rozumieniu mniejszego średniego błędu bezwzględnego, niż metoda naiwna.
+
+W związku z tym, do szeregów czasowych dla danej godziny zostały wprowadzone dodatkowe informacje o cenach z pozostałych godzin. Pierwszym zestawem dodatkowych zmiennych są ceny z wszystkich godzin dnia poprzedniego, dostępne w chwili wyliczania prognozy. Drugim zestawem są ceny kontraktów dla dwudziestu trzech godzin poprzedzających prognozowaną godzinę. Te informacje nie są w pełni dostępne w chwili wyliczenie prognozy, więc podczas prognozowania ceny dla danej godziny, w przypadku braku aktualnych wartości poprzedzających cen, zostaną użyte wartości prognozowane. Na przykład dla godziny dziesiątej nie są znane ceny dla wcześniejszych godzin danej doby, czyli od pierwszej do dziewiątej, zatem zamiast nich użyte zostaną prognozy tych cen z odpowiednich modeli dla poszczególnych godzin.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+start_training <- ymd(20190401)
+end_training <- ymd(20200331)
+start_testing <- end_training + days(1)
+end_testing <- NULL
+
+training <- mData %>%
+  filter(trading_date >= start_training & trading_date <= end_training)
+training_o <- training %>% removeOutliers()
+testing <- mData %>% filter(trading_date >= start_testing)
+
+lmModels <- function(input, input_o) {
+ 
+  f_ARIMAX <- Price ~ fctLoad +
+    lPrice1 + lPrice2 + lPrice3 + lPrice4 + lPrice5 + lPrice6 + lPrice7 + lPrice8 +
+    lPrice9 + lPrice10 + lPrice11 + lPrice12 + lPrice13 + lPrice14 + lPrice15 + lPrice16 +
+    lPrice17 + lPrice18 + lPrice19 + lPrice20 + lPrice21 + lPrice22 + lPrice23 +
+    weekday_Tue + weekday_Wed + weekday_Thu + weekday_Fri + weekday_Sat + weekday_Sun
+  
+  f_TSLM <- Price ~ fctLoad +  
+    sPrice7 + 
+    pPrice1 + pPrice2 + pPrice3 + pPrice4 + pPrice5 + pPrice6 + pPrice7 + pPrice8 +
+    pPrice9 + pPrice10 + pPrice11 + pPrice12 + pPrice13 + pPrice14 + pPrice15 + pPrice16 +
+    pPrice17 + pPrice18 + pPrice19 + pPrice20 + pPrice21 + pPrice22 + pPrice23 + pPrice24 +
+    weekday_Tue + weekday_Wed + weekday_Thu + weekday_Fri + weekday_Sat + weekday_Sun
+
+  m_ARIMAX <- input %>%
+    model(mARIMAX = ARIMA(f_ARIMAX, stepwise = FALSE))
+  
+  m_TSLM <- input_o %>%
+    model(mTSLM = TSLM(f_TSLM))
+  
+  list(m_ARIMAX = m_ARIMAX, m_TSLM = m_TSLM, f_ARIMAX = f_ARIMAX, f_TSLM = f_TSLM)
+}
+
+plan("multisession")
+temp <- lmModels(training, training_o)
+plan("sequential")
+
+m_ARIMAX <- temp[["m_ARIMAX"]]
+m_TSLM <- temp[["m_TSLM"]]
+f_ARIMAX <- temp[["f_ARIMAX"]]
+f_TSLM <- temp[["f_TSLM"]]
+
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+temp1 <- training_o %>% as_tibble() %>% select(-trading_date) %>% group_by(Hour) %>%
+  nest() %>% ungroup()
+temp2 <- testing %>% as_tibble() %>% select(-trading_date) %>% group_by(Hour) %>%
+  nest() %>% ungroup()
+
+temp3 <- temp1 %>% left_join(temp2, by = "Hour") %>%
+  rename(training = data.x, testing = data.y)
+
+glmnetModels <- function(tr) {
+  
+  tr_x <- tr %>% select(all.vars(f_TSLM), -Price) %>% data.matrix()
+  tr_y <- pull(tr, Price)
+  
+  method <- "cv"
+  n <- ifelse(grepl("cv", method), 10, 25)
+  seeds <- vector(mode = "list", length = n + 1) %>% map(~0)
+  
+  cv_models <- train(x = tr_x, y = tr_y,
+                            method = "glmnet", family = "gaussian", metric = "MAE",
+                            trControl = trainControl(method = method,
+                                                     seeds = seeds,
+                                                     allowParallel = TRUE),
+                            tuneGrid = expand.grid(lambda = c(seq(0.1, 10, 0.1)),
+                                                   alpha = 1))
+  
+  best_tune <- pluck(cv_models, "bestTune")
+  
+  glmnet(x = tr_x, y = tr_y, family = gaussian(), lambda = best_tune["lambda"])
+}
+
+getGLMNETForecast <- function(object, ts) {
+  
+  ts_x <- ts %>% select(all.vars(f_TSLM), -Price) %>% data.matrix()
+  
+  predict(object, newx = ts_x)[, 1]
+}
+
+set.seed(0)
+
+cl <- makePSOCKcluster(8)
+registerDoParallel(cl)
+
+m_GLMNET <- temp3 %>% mutate(model = map(training, glmnetModels)) %>%
+  mutate(actual = map(testing, ~select(.x, Price)),
+         forecast = map2(model, testing, getGLMNETForecast))
+
+stopCluster(cl)
+
+resGLMNET_h <- m_GLMNET %>% unnest(cols = c(actual, forecast)) %>%
+  rename(fctPrice = forecast) %>% mutate(resid = Price - fctPrice) %>%
+  group_by(Hour) %>% summarize(name = "mGLMNET", value = mean(abs(resid)))
+
+rm(temp, temp1, temp2, temp3, cl)
+gc()
+
+```
+
+W pierwszym kroku zbudowane zostały modele na formułach, zawierających wszystkie dodatkowe zmienne i jakość ich prognoza została porównana do metod naiwnych, opisanych w poprzednim rozdziale.
+
+Użyto dwóch formuł zdefiniowanych poniżej, gdzie `fctLoad` oznacza prognozowane zapotrzebowanie mocy dla danej godziny dostawy, zmienne oznaczone `lPrice` oznaczają ceny kontraktów godzinowych dla poprzednich godzin doby, zmienne oznaczone `pPrice` oznaczają ceny kontraktów dla poszczególnych godzin doby z dnia poprzedniego, zmienna `sPrice7` to cena kontraktu sprzed siedmiu dni, a zerojedynkowe zamienne zaczynające się od słowa `weekday` wskazują na konkretny dzień tygodnia.
+
+Formuła dla modelu ARIMAX (`mARIMAX`) ma postać:
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+f <- as.character(f_ARIMAX)
+
+f <- str_c(f[2], " = ", str_replace_all(f[3], "_", "\\\\_"))
+
+```
+
+$`r f`$
+
+Formuła dla modelu regresji liniowej (`mTSLM`) ma postać:
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+f <- as.character(f_TSLM)
+
+f <- str_c(f[2], " = ", str_replace_all(f[3], "_", "\\\\_"))
+
+```
+
+$`r f`$
+
+Modele, przygotowane dla każdej godziny dostawy osobno, użyte zostały do wyliczenia prognoz dwudziestu czterech cen kontraktów godzinowych dla każdej doby zbioru testowego. Wynik porównany został do metody naiwnej (`NAIVE1`), która zakłada, że cena kontraktu na daną godzinę dostawy jest równa cenie kontraktu na tę godzinę z poprzedniego dnia oraz alternatywnej metody naiwnej (`NAIVE7`) zakładającej, że cena kontraktu na daną godzinę jest równa cenie kontraktu na tą godzinę z tego samego dnia z poprzedniego tygodnia.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+getARIMAXForecast <- function() {
+  
+  getForecast <- function(input, hour) {
+    
+    m_ARIMAX %>% filter(Hour == hour) %>%
+      forecast(filter(input, Hour == hour)) %>% as_tibble() %>%
+      select(trading_date, Hour, fctPrice = .mean)
+  }
+  
+  input <- testing %>% arrange(trading_date, Hour)
+  output <- NULL
+  .interval = interval(input)
+  
+  for (i in 1:24) {
+    
+    if (i > 1) {
+      for (j in 1:(i - 1)) {
+        p <- str_c("lPrice", j)
+        input <- input %>%
+          mutate(!!p := (if_else(is.na(lag(fctPrice, j)) | Hour - j < 0,
+                                 eval(sym(p)), lag(fctPrice, j)))) %>%
+          build_tsibble(key = Hour, index = trading_date, interval = .interval) %>%
+          arrange(trading_date, Hour)
+      }
+      input <- input %>% select(-fctPrice)
+    }
+    
+    temp <- getForecast(input, i)
+    output <- bind_rows(output, temp)
+    input <- input %>% left_join(output, by = c("trading_date", "Hour"))
+  }
+  
+  input %>% as_tibble() %>%
+    left_join(testing, by = c("trading_date", "Hour")) %>%
+    mutate(Price = Price.y,
+           fctPrice_mARIMAX = fctPrice, resid_mARIMAX = Price - fctPrice) %>%
+    select(trading_date, Hour, Price, fctPrice_mARIMAX, resid_mARIMAX)
+}
+
+getTSLMForecast <- function() {
+  
+  m_TSLM %>% forecast(testing) %>% as_tibble() %>% 
+    left_join(testing, by = c("trading_date", "Hour")) %>%
+    mutate(Price = Price.y, fctPrice = .mean, resid = Price.y - .mean) %>%
+    select(.model, trading_date, Hour, Price, fctPrice, resid) %>%
+    pivot_wider(names_from = .model, values_from = c(fctPrice, resid))
+}
+
+getNaiveForecast <- function(d = 1) {
+  
+  lookback <- 24 * d
+  last <- training %>% arrange(trading_date, Hour) %>% tail(lookback) %>% as_tibble()
+  
+  t <- str_c("NAIVE", d)
+  
+  p <- str_c("fctPrice_", t)
+  r <- str_c("resid_", t)
+  
+  bind_rows(last, as_tibble(testing)) %>% arrange(trading_date, Hour) %>%
+    mutate(!!p := lag(Price, lookback), !!r := Price - eval(sym(p))) %>%
+    filter(!is.na(eval(sym(p)))) %>% select(trading_date, Hour, Price, !!p, !!r)
+}
+
+#getARIMAXForecast <- function() {
+#
+#  forecast_ARIMAX() %>% as_tibble() %>%
+#    left_join(testing, by = c("trading_date", "Hour")) %>%
+#    mutate(Price = Price.y,
+#           fctPrice_mARIMAX = fctPrice, resid_mARIMAX = Price - fctPrice) %>%
+#    select(trading_date, Hour, Price, fctPrice_mARIMAX, resid_mARIMAX)
+#}
+
+temp <- getTSLMForecast() %>%
+  left_join(getARIMAXForecast(), by = c("trading_date", "Hour")) %>%
+  left_join(getNaiveForecast(1), by = c("trading_date", "Hour")) %>%
+  left_join(getNaiveForecast(7), by = c("trading_date", "Hour")) %>%
+  select(trading_date, Hour, Price = Price.x,
+         starts_with("fctPrice"), starts_with("resid"))
+
+temp <- temp %>% select(Hour, starts_with("resid")) %>%
+  pivot_longer(starts_with("resid")) %>%
+  group_by(Hour, name) %>%
+  summarize(value = mean(abs(value)))
+
+resLM_h <- temp %>%
+  mutate(name = str_replace(name, "resid_", ""), value = rescale(value, .resid = TRUE))
+
+```
+
+Poniższy wykres przedstawia średni błąd bezwzględny (MAE) w zbiorze testowym w zależności od godziny dostawy dla modelu ARIMAX (`mARIMAX`), regresji liniowej (`mTSLM`) oraz metod naiwnych, opisanych powyżej.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Średni błąd bezwzględny (MAE) w zbiorze testowym w zależności od godziny dostawy"}
+
+resLM_h %>% plotMAE_h()
+
+```
+
+Łączny średni błąd bezwzględny (MAE) dla poszczególnych modeli przedstawiono w tabeli poniżej. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+resLM_h %>% tableMAE() %>%
+  kable(caption = "Łączny średni błąd bezwzględny (MAE) w zbiorze testowym")
+
+```
+
+Z wartości przedstawionych w tabeli wynika, że prognozy modelu regresji liniowej w zbiorze testowym osiągają nieco niższy średni błąd bezwzględny niż metody naiwne i model ARIMAX. Analizując błędy dla poszczególnych godzin dostawy można zauważyć, że modele osiągają różne wyniki w różnych porach dnia. W ciągu dnia, od godziny 10 do 21, ceny osiągają najwyższe poziomy i charakteryzują się największym rozrzutem, natomiast w nocy i rano, od godziny 22 do 9, ceny są niższe i mają mniejszy rozrzut. Rozrzut cen i częstsze występowanie wartości odstających w ciągu dnia obniża jakość prognoz modeli i wskazuje metodą naiwną jako najlepszy sposób prognozowania cen w tym okresie, natomiast dla pory nocnej i godzin porannych błędy prognoz modeli statystycznych są niższe niż dla metod naiwnych. Modele te nie są jednak optymalne z punktu widzenia własności statystycznych.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Średni błąd bezwzględny (MAE) w zbiorze testowym"}
+
+plotMAE <- function(input) {
+  
+  input %>%
+    mutate(period = if_else(Hour %in% 10:21, "Dzień [10-21]", "Noc i rano [22-9]")) %>%
+    group_by(period, name) %>% summarize(MAE = mean(value)) %>%
+    ggplot(mapping = aes(x = name, y = MAE, label = round(MAE, digits = 2), fill = name)) +
+    geom_col() +
+    geom_text(position = position_stack(vjust = 0.5)) +
+    theme_minimal() +
+    guides(fill = FALSE) +
+    facet_wrap(~period) +
+    xlab("Model") +
+    ylab("Średni błąd bezwzględny (MAE)") +
+    scale_fill_brewer(palette = "Blues")
+}
+
+resLM_h %>% plotMAE()
+
+```
+
+Zbudowane modele mają złożoną postać i usiłują znaleźć zależność liniową ceny kontraktu terminowego od kilkunastu zmiennych objaśniających. Nie wszystkie zmienne okazują się istotne w każdym  modelu, niektóre z nich nie są istotne w żadnym modelu. Na wykresach poniżej przedstawiono rozkład wartości $p$ dla modelu regresji liniowej oraz dla modelu ARIMAX.
+
+```{r echo=FALSE, fig.cap="Rozkład wartości p dla modelu regresji liniowej", message=FALSE, warning=FALSE}
+
+plotPValue <- function(input) {
+  
+  input %>% ggplot(mapping = aes(x = term, y = p.value)) +
+    geom_boxplot() +
+    coord_flip() +
+    theme_minimal() +
+    ylab("Wartość p") +
+    xlab("Zmienna w modelu")
+}
+
+terms <- m_TSLM %>% tidy()
+terms$term <- str_replace_all(terms$term, "\\(Intercept\\)", "Wyraz wolny")
+
+terms %>% plotPValue()
+
+```
+
+```{r echo=FALSE, fig.cap="Rozkład wartości p dla modelu ARIMAX", message=FALSE, warning=FALSE}
+
+terms <- colnames(training) %>% as_tibble_col(column_name = "term") %>%
+  add_row(term = "intercept")
+
+t <- m_ARIMAX %>% tidy() %>% inner_join(terms, by = "term")
+t$term <- str_replace_all(t$term, "intercept", "Wyraz wolny")
+
+t %>% plotPValue()
+
+rm(t)
+
+```
+
+Do kolejnego etapu modelowania wybrane zostały tylko te zmienne, które są istotne (wartość $p < 0.05$) w co najmniej dwunastu modelach, z dwudziestu czterech budowanych modeli dla każdej godziny dostawy.
+Dla regresji liniowej następujące zmienne okazują się być istotne w co najmniej połowie modeli i na nich zbudowano kolejną serię modeli.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+selectTerms <- function(input) {
+  
+  input %>% mutate(p = if_else(p.value < 0.05, 1, 0)) %>%
+    group_by(term) %>% summarize(m_count = sum(p), v_mean = mean(p.value)) %>%
+    filter(m_count >= 12) %>% select(term) %>% arrange(term) %>%
+    rename(Zmienna = term)
+}
+
+m_TSLM %>% tidy() %>% selectTerms() %>%
+  kable(caption = "Lista zmiennych, które są istotne w co najmniej połowie modeli regresji liniowej")
+
+```
+
+Dla modeli ARIMAX tylko dwie zmienne, wymienione poniżej, okazały się być istotne w co najmniej połowie modeli. Jednakże analiza dla modeli regresji liniowej oraz wstępna analiza danych (wykres \@ref(fig:dni-godziny)) sugeruje, aby do formuły dodać dwie zmienne określające czy dany dzień jest piątkiem (`weekday_Fri`) i niedzielą (`weekday_Sun`).
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+m_ARIMAX %>% tidy() %>% inner_join(terms, by = "term") %>%
+  selectTerms() %>%
+  kable(caption = "Lista zmiennych, które są istotne w co najmniej połowie modeli ARIMAX")
+
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+lmModels <- function(input, input_o) {
+
+  f_ARIMAX <- Price ~ lPrice1 + weekday_Fri + weekday_Sat + weekday_Sun
+  
+  f_TSLM <- Price ~ sPrice7 + 
+    pPrice19 + pPrice24 +
+    weekday_Fri + weekday_Sat + weekday_Sun
+
+  m_ARIMAX <- input %>%
+    model(mARIMAX = ARIMA(f_ARIMAX, stepwise = FALSE))
+  
+  m_TSLM <- input_o %>%
+    model(mTSLM = TSLM(f_TSLM))
+  
+  list(m_ARIMAX = m_ARIMAX, m_TSLM = m_TSLM, f_ARIMAX = f_ARIMAX, f_TSLM = f_TSLM)
+}
+
+plan("multisession")
+temp <- lmModels(training, training_o)
+plan("sequential")
+
+m_ARIMAX <- temp[["m_ARIMAX"]]
+m_TSLM <- temp[["m_TSLM"]]
+f_ARIMAX <- temp[["f_ARIMAX"]]
+f_TSLM <- temp[["f_TSLM"]]
+
+rm(temp)
+
+```
+
+Zatem, po uproszeniu formuła dla modelu ARIMAX ma postać:
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+f <- as.character(f_ARIMAX)
+
+f <- str_c(f[2], " = ", str_replace_all(f[3], "_", "\\\\_"))
+
+```
+
+$`r f`$
+
+Natomiast formułę dla modelu regresji liniowej przedstawia poniższy wzór:
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+f <- as.character(f_TSLM)
+
+f <- str_c(f[2], " = ", str_replace_all(f[3], "_", "\\\\_"))
+
+```
+
+$`r f`$
+
+Warto zauważyć, że jedną ze zmiennych objaśniających w modelu `mTSLM` jest cena kontraktu na energię elektryczną z tej samej godziny sprzed tygodnia (`sPrice7`) tak jak w metodzie naiwnej `NAIVE7`, która jest uzupełniona o dwie ceny z poprzedniego dnia (z godziny 19 i 24) oraz o informację czy dany dzień jest piątkiem, sobotą lub niedzielą.
+
+Analogicznie jak poprzednio, wyliczono prognozy powyższych modeli dla zbioru testowego i porównano je do metod naiwnych.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+temp <- getTSLMForecast() %>%
+  left_join(getARIMAXForecast(), by = c("trading_date", "Hour")) %>%
+  left_join(getNaiveForecast(1), by = c("trading_date", "Hour")) %>%
+  left_join(getNaiveForecast(7), by = c("trading_date", "Hour")) %>%
+  select(trading_date, Hour, Price = Price.x,
+         starts_with("fctPrice"), starts_with("resid"))
+
+temp <- temp %>% select(Hour, starts_with("resid")) %>%
+  pivot_longer(starts_with("resid")) %>%
+  group_by(Hour, name) %>%
+  summarize(value = mean(abs(value)))
+
+resLM_h <- temp %>%
+  mutate(name = str_replace(name, "resid_", ""), value = rescale(value, .resid = TRUE))
+
+```
+
+Poniższy wykres przedstawia średni błąd bezwzględny (MAE) w zbiorze testowym w zależności od godziny dostawy dla modeli ARIMAX i regresji liniowej po uproszczeniu formuł oraz metod naiwnych.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Średni błąd bezwzględny (MAE) w zbiorze testowym w zależności od godziny dostawy"}
+
+resLM_h %>% plotMAE_h()
+
+```
+
+Krzywe dla modelu `mTSLM` i metody naiwnej `NAIVE7` mają podobne kształty, ponieważ obie prognozy korzystają z wartości kontraktu na energię elektryczną sprzed tygodnia. Jednakże uwzględnienie kilku dodatkowych zmiennych do modelu regresji liniowej istotnie poprawia wyniki prognozy względem `NAIVE7`.
+
+Uproszczenie formuł znacząco poprawiło również wyniki modelu `mARIMAX` wpływając na kształt krzywej, jednak pogorszeniu uległy prognozy pod koniec doby.
+
+Łączny średni błąd bezwzględny (MAE) dla poszczególnych modeli przedstawiono w tabeli poniżej. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+resLM_h %>% tableMAE() %>%
+  kable(caption = "Łączny średni błąd bezwzględny (MAE) w zbiorze testowym")
+
+```
+
+Widoczna jest zdecydowana poprawa wyników po uproszczeniu formuł: średni błąd bezwzględny jest niższy zarówno dla modelu ARIMAX jak również dla regresji liniowej.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Średni błąd bezwzględny (MAE)"}
+
+resLM_h %>% plotMAE()
+
+```
+
+Poprawiła się jakość prognoz dla godzin z przedziału od 10 do 21, jednakże nieznacznemu pogorszeniu uległy prognozy dla godzin nocnych i porannych w przypadku modelu ARIMAX. W obu okresach doby model `mTSLM` osiąga najlepsze rezultaty ze wszystkich dotychczas rozważanych modeli, zatem w dalszej części pracy będzie stanowił, obok metod naiwnych, punkt odniesienia dla modelu rekurencyjnej sieci neuronowej.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Średni błąd bezwzględny (MAE) w zbiorze testowym w zależności od godziny dostawy"}
+
+resGLMNET_h <- bind_rows(resLM_h, resGLMNET_h)
+
+resGLMNET_h %>% plotMAE_h()
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Średni błąd bezwzględny (MAE)"}
+
+resGLMNET_h %>% plotMAE()
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+resGLMNET_h %>% tableMAE() %>%
+  kable(caption = "Łączny średni błąd bezwzględny (MAE) w zbiorze testowym")
+
+```
+
+### Rekurencyjna sieć neuronowa
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+library(keras)
+
+val_windows <- 24 * 91
+lookback <- 24 * 7
+
+delay <- 0
+forward <- 24
+neurons <- 24
+
+start_training = ymd(20170401) - days(val_windows / 24) + 1
+end_training = ymd(20200331) - days(val_windows/24)
+delta = as.integer(end_training - start_training + 1)
+
+temp <- prepareData(start_training,
+                    scaling = TRUE,
+                    previous_day_statistics = FALSE, lagged_prices = FALSE)
+mData <- temp$data
+adjustments <- temp$adjustments
+
+rm(temp)
+
+mData <- as_tibble(mData) %>% mutate(trading_dh = trading_date + hours(Hour - 1)) %>%
+  select(trading_dh, everything(), -trading_date) %>%
+  dummy_cols(select_columns = "Hour", remove_first_dummy = TRUE,
+             ignore_na = TRUE, remove_selected_columns = TRUE)
+
+mData <- mData %>% select(-actLoad, -starts_with("pPrice"), -starts_with("s")) %>%
+  arrange(trading_dh)
+
+```
+
+W ostatnich latach coraz większą popularnością cieszy się zastosowanie sieci neuronowych, między innymi do rozwiązywania problemów regresyjnych. Jest to również jedno z najpopularniejszych narzędzi stosowanych w literaturze dotyczącej prognozowania cen energii elektrycznej [@epf].
+
+Szczególnie interesujące w kontekście prognozowania szeregów czasowych są rekurencyjne sieci neuronowe, które, w przeciwieństwie do sieci jednokierunkowych, posiadają wewnętrzną pamięć, polegającą na tym, że przetwarzając sekwencję poprzez iterację kolejnych elementów, utrzymują one stan, czyli zbiór informacji o tym, co zostało dotychczas przetworzone. Umożliwia to znajdowanie zależności wynikających z kolejności lub upływu czasu [@dl]. W przypadku szeregu cen energii elektrycznej ta własność rekurencyjnych sieci neuronowych powinna pomóc algorytmowi rozpoznać wzorzec złożonej sezonowości o kilku okresach, którą charakteryzują się ceny energii elektrycznej.
+
+Współcześnie, ze względu na problem zaniku gradientu w przypadku klasycznych sieci rekurencyjnych, który służy do wyznaczania optymalnych wag sieci, stosuje się rekurencyjne sieci neuronowe typu LSTM oraz ich uproszczoną wersję, składającą się z jednostek rekurencyjnych ograniczonych bramkami (GRU), która wymaga mniejszych nakładów obliczeniowych niż LSTM.
+
+W tej części pracy przedstawione zostaną wyniki modelu opartego o dwukierunkową rekurencyjną sieć neuronową z jednostkami typu GRU. Zastosowanie dwukierunkowości oznacza, że sieć będzie przetwarzać sekwencje jednocześnie w dwóch warstwach: w kierunku chronologicznym w jednej warstwie i w kierunku przeciwnym do chronologicznego w drugiej warstwie, po czym informacje uzyskane z obu warstw zostaną połączone. Taki sposób przetwarzania informacji pozwala na znalezienie zależności, które w inny sposób mogłyby zostać pominięte [@dl].
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+data <- data.matrix(select(mData, -trading_dh))
+target_pos <- str_which(colnames(data), "^Price$")
+
+start_training <- 1
+end_training <- start_training + 24 * delta - 1 - lookback
+
+start_validation <- end_training + 1
+end_validation <- start_validation + val_windows - 1
+
+start_testing <- end_validation + 1
+
+gcd <- function(x, y) {
+  r <- x%%y
+  ifelse(r, gcd(y, r), y)
+}
+
+x <- end_training - start_training + 1 - lookback
+r <- as.integer(x - 1)
+
+for (i in 1:(x - 1))
+  r[i] <- gcd(x, i)
+
+r <- unique(x / r[order(r, decreasing = TRUE)])
+
+batch_size <- r[21]
+
+rm(gcd, r, x)
+
+train_steps <- (end_training - start_training + 1 - lookback) / batch_size
+val_steps <- (end_validation - start_validation + 1 - lookback) / 24
+test_steps <- (nrow(mData) - start_testing + 1 - lookback) / 24
+
+```
+
+Sieć uczono na danych zawierających ceny kontraktów godzinowych na energię elektryczną od `r mData[start_training,] %>% pull(trading_dh) %>% date()` do `r mData[end_training + lookback,] %>% pull(trading_dh) %>% date()`, czyli okresie trzech pełnych lat kalendarzowych. Tak długi zbiór danych jest konieczny do znalezienia optymalnych wag sieci i z jednej strony może on wnieść dodatkowe informacje, do których dostępu nie miały wcześniej omawiane modele, przyczyniając się potencjalnie do przewagi sieci neuronowej nad modelami ekonometrycznymi. Z drugiej jednak strony, ceny kontraktów na energię elektryczną w drugiej połowie 2018 roku obciążone były wysokimi cenami uprawnień do emisji CO~2~ oraz węgla [@ksceewp], co może wpłynąć na uczenie sieci, sugerując fałszywy trend lub cykliczność, która w rzeczywistości nie występuje.
+
+Sieć walidowano danymi z cenami kontraktów od `r mData[start_validation + lookback,] %>% pull(trading_dh) %>% date()` do `r mData[end_validation + lookback,] %>% pull(trading_dh) %>% date()`. Następnie, podobnie jak we wcześniej prezentowanych modelach, policzono średni błąd bezwzględny (MAE) na zbiorze testowym, obejmującym okres od `r mData[start_testing + lookback,] %>% pull(trading_dh) %>% date()` do `r mData %>% tail(1) %>% pull(trading_dh) %>% date()`. Zatem wszystkie modele testowane były na tym samym zbiorze, do którego wcześniej nie miały dostępu.
+
+Architektura zastosowanej sieci neuronowej składa się z dwóch warstw: z dwukierunkowej warstwy rekurencyjnej z `r neurons` jednostkami ograniczonymi bramkami (GRU) w każdym kierunku, co łącznie daje `r 2*neurons` jednostek oraz z wyjściowej warstwy gęstej z `r forward` neuronami, która zwraca wektor, stanowiący prognozy cen kontraktów godzinowych na energię elektryczną na kolejne `r forward` godziny.
+
+Do optymalizacji wag sieci zastosowano optymalizator oparty o algorytm RMSprop, który minimalizuje funkcję straty zdefiniowaną jako średni błąd bezwzględny.
+
+Każda sekwencja,  którą przetwarza sieć neuronowa w kolejnych iteracjach, składa się ze `r lookback` obserwacji, zawierających dane z poprzedzającego tygodnia, co pozwala uchwycić sezonowość dobową i tygodniową.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+generator <- function(data, lookback, delay = 0, forward = 1,
+                      min_index, max_index, shuffle = FALSE, batch_size = 24) {
+
+  if (is.null(max_index))
+    max_index <- nrow(data) - delay - forward + 1
+  
+  i <- min_index + lookback
+  
+  function() {
+
+    if (shuffle) {
+      rows <- sample(c((min_index + lookback):max_index), size = batch_size)
+      len <- length(rows)
+    } else {
+      rows <- c(i:min(i + batch_size - 1, max_index))
+      len <- length(rows)
+      if (i + batch_size - 1 >= max_index)
+        i <<- min_index + lookback
+      else
+        i <<- i + len
+    }
+    
+    samples <- array(0, dim = c(len, lookback, dim(data)[[-1]]))
+    targets <- array(0, dim = c(len, forward))
+
+    for (j in 1:len) {
+      indices <- seq(rows[[j]] - lookback, rows[[j]] - 1, length.out = dim(samples)[[2]])
+      samples[j,,] <- cbind(data[indices, target_pos],
+                            data[indices + 1, (target_pos + 1):ncol(data)])
+      targets[j,] <- data[(rows[[j]] + delay):(rows[[j]] + delay + forward - 1),
+                          target_pos]
+    }           
+    list(samples, targets)
+  }
+}
+
+train_gen <- generator(data, lookback = lookback, delay = delay, forward = forward,
+                       min_index = start_training, max_index = end_training,
+                       shuffle = TRUE, batch_size = batch_size)
+
+val_gen = generator(data, lookback = lookback, delay = delay, forward = forward,
+                    min_index = start_validation, max_index = end_validation,
+                    batch_size = 24)
+
+test_gen <- generator(data, lookback = lookback, delay = delay, forward = forward,
+                      min_index = start_testing, max_index = NULL,
+                      batch_size = 24)
+
+rm(generator)
+
+set.seed(0)
+
+rnnModel <- keras_model_sequential() %>% 
+  bidirectional(layer_gru(units = neurons), input_shape = list(NULL, dim(data)[[-1]])) %>% 
+  layer_dense(units = forward)
+
+rnnModel %>% compile(optimizer = optimizer_rmsprop(), loss = "mean_absolute_error")
+
+if(trainRNN) {
+  
+  history <- rnnModel %>% fit_generator(
+    generator = train_gen,
+    steps_per_epoch = train_steps,
+    epochs = 40,
+    callbacks = list(callback_early_stopping(patience = 5),
+                     callback_model_checkpoint("models/rnnModel.hdf5",
+                                               save_best_only = TRUE)),
+    validation_data = val_gen,
+    validation_steps = val_steps)
+  
+} else {
+  rnnModel <- load_model_hdf5("models/rnnModel24_15102020_auto.hdf5")
+  load("models/history24_15102020.RData")
+}
+
+rnnMAE <- evaluate_generator(rnnModel, generator = test_gen, steps = test_steps)
+
+```
+
+Sieć uczono na `r history$params$epochs` epokach i historię uczenia przedstawiono na poniższym wykresie. Po około 30 epokach wartość funkcji straty na zbiorze walidacyjnym ustabilizowała się i każda kolejna epoka nie poprawiała już istotnie wyników sieci. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Historia uczenia się sieci neuronowej"}
+
+history %>% as.data.frame() %>%
+  ggplot(mapping = aes(x = epoch, y = value, color = data)) +
+    geom_point() + geom_line() +
+    theme_minimal() +
+    theme(legend.position = "bottom") +
+    xlab("Epoka") +
+    ylab("Wartość funkcji straty") +
+    scale_color_discrete(labels = c("treningowy", "walidacyjny")) +
+    labs(color = "Zbiór")
+
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+rnnForecasts <- function(generator = test_gen, steps = test_steps, lookback = 1) {
+
+  output_p <- NULL
+  output_f <- NULL
+  output_r <- NULL
+
+  for (i in 1:steps) {
+    c(samples, targets) %<-% generator()
+
+    fctPrice_NAIVE <- samples[, dim(samples)[[2]] - lookback + 1, target_pos]
+    fctPrice_RNN <- predict(rnnModel, samples)
+
+    resid_NAIVE <- targets - fctPrice_NAIVE
+    resid_RNN <- targets - fctPrice_RNN
+
+    colnames(targets) <- str_c("Price_", 1:forward)
+    colnames(fctPrice_RNN) <- str_c("fctPrice_RNN_", 1:forward)
+    colnames(resid_NAIVE) <- str_c("resid_NAIVE_", 1:forward)
+    colnames(resid_RNN) <- str_c("resid_RNN_", 1:forward)
+
+    targets <- as_tibble(targets)
+    fctPrice_RNN <- as_tibble(fctPrice_RNN)
+    resid_NAIVE <- as_tibble(resid_NAIVE)
+    resid_RNN <- as_tibble(resid_RNN)
+
+    output_p <- bind_rows(output_p, targets)
+    output_f <- bind_rows(output_f, bind_cols(tibble(fctPrice_NAIVE), fctPrice_RNN))
+    output_r <- bind_rows(output_r, bind_cols(resid_NAIVE, resid_RNN))
+  }
+  
+  list(output_p, output_f, output_r)
+}
+
+temp <- rnnForecasts(lookback = 24)
+
+```
+
+Poniższy wykres przedstawia średni błąd bezwzględny (MAE) w zbiorze testowym w zależności od godziny dostawy dla modelu regresji liniowej po uproszczeniu formuł, metod naiwnych oraz rekurencyjnej sieci neuronowej (`mRNN`).
+
+```{r mae-hour, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Średni błąd bezwzględny (MAE) w zbiorze testowym w zależności od godziny dostawy"}
+
+i <- seq(1, nrow(temp[[3]]), by = 24)
+
+resRNN_h <- rescale(temp[[3]][i,][, 25:48], .resid = TRUE) %>%
+  pivot_longer(everything(), names_to = "Hour", values_to = "value") %>%
+  group_by(Hour) %>% summarize(value = mean(abs(value))) %>%
+  mutate(Hour = as.numeric(str_extract(Hour, "\\d+$")), name = "mRNN") %>%
+  select(Hour, name, value)
+
+temp_resid <- bind_rows(filter(resLM_h, name != "mARIMAX"), resRNN_h)
+
+delta_hours <- temp_resid %>% filter(name %in% c("mTSLM", "mRNN")) %>%
+  pivot_wider() %>% mutate(d = mRNN - mTSLM) %>% ungroup() %>% filter(d > 0) %>%
+  mutate(h = median(d)) %>% filter(d > h) %>%
+  arrange(Hour) %>% pull(Hour) %>% str_c(collapse = ", ")
+
+temp_resid %>% plotMAE_h()
+
+```
+
+Łączny średni błąd bezwzględny (MAE) dla poszczególnych modeli przedstawiono w tabeli poniżej.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+temp_resid  %>% tableMAE() %>%
+  kable(caption = "Łączny średni błąd bezwzględny (MAE) w zbiorze testowym")
+
+```
+
+```{r mae-all, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Średni błąd bezwzględny (MAE) w zbiorze testowym"}
+
+temp_resid %>% plotMAE()
+
+```
+
+Średni błąd bezwzględny prognoz w zbiorze testowym modelu opartego o rekurencyjną sieć neuronową (`mRNN`) jest nieznacznie wyższy od błędu modelu regresji liniowej (`mTSLM`). Model `mTSLM` osiągnął lepsze rezultaty zarówno w dzień jak również w godzinach nocnych i porannych (wykres \@ref(fig:mae-all)). Przyczyniły się do tego relatywnie duże błędy modelu `mRNN` dla kilku godzin w ciągu doby (`r delta_hours`). Analizując wartości błędu MAE w zależności od godziny dostawy (wykres \@ref(fig:mae-hour)) można zauważyć, że w przypadku pozostałych godzin, sieć osiągnęła podobne lub lepsze rezultaty od modelu `mTSLM`, jednak skala błędu we wspomnianych wyżej godzinach jest na tyle duża, że łączny średni błąd bezwzględny okazuje się być wyższy niż dla modelu `mTSLM`. 
+
+## Podsumowanie
+
+Ceny kontaktów godzinowych na energię elektryczną stanowią niestacjonarny szereg czasowy o wielookresowej sezonowości. Ta własność szeregu stanowi utrudnienie w stosowaniu klasycznych modeli autoregresyjnych, które mogą uwzględnić tylko jeden rodzaj sezonowości. Z drugiej strony, ceny energii elektrycznej zdają się kształtować się według pewnego wzorca, który powinien ułatwić sformułowanie modelu i prognozowanie cen.
+
+W pracy zaprezentowano kilka podejść do problemu prognozowania. Model ARIMA zbudowany na godzinowym szeregu czasowym nie potrafi uwzględnić złożonej sezonowości, przez co reszty z modelu nie posiadają oczekiwanych własności, lecz odpowiedni dobór parametrów (`mARIMA3`) daje prognozy, które są nieco lepsze od metod naiwnych. Modele ARIMAX i regresji liniowej, które powstały dla każdej godziny z osobna, po uproszczeniu formuł dają już całkiem zadawalające rezultaty względem metod naiwnych. Zastosowany dobór zmiennych do modelu nie jest idealny, ale ilustruje, że można znacząco poprawić jakoś prognoz poprzez odrzucenie zbędnych zmiennych. To jest miejsce, w którym modele można dalej doskonalić, na przykład wybierając istotne zmienne dla każdej godziny osobno (a nie łącznie jak przedstawiono w pracy) i stosując regresję regularyzowaną zamiast ręcznej selekcji zmiennych. Jednak metoda zastosowana w pracy pokazała, że metoda naiwna bazująca na cenie sprzed tygodnia, zmodyfikowana o kilka dodatkowych informacji stanowi najlepszy model prognostyczny z rozważanych w pracy. Formuła najlepszego modelu `mTSLM`:
+
+$`r f`$
+
+mówi, że cena kontraktu zależy od ceny dla danej godziny sprzed tygodnia, cen z godzin 19 i 24 z poprzedniego dnia oraz od tego czy dany dzień jest piątkiem, sobotą czy niedzielą.
+
+W tym kontekście model zbudowany w oparciu o rekurencyjną sieć neuronową należy ocenić niejednoznacznie. Ze wszystkich rozważanych w pracy modeli, jest najbardziej czasochłonny i wymagający obliczeniowo, co znacząco utrudnia optymalizację jego hiperparametrów, takich jak liczba jednostek w warstwie rekurencyjnej, jej typ (GRU czy LSTM), długość sekwencji. Ponadto w przeciwieństwie do modelu regresji liniowej `mTSLM` nie daje żadnych informacji jakie zmienne wpływają na wartość kontraktu w przyszłości. Z drugiej strony, pomimo osiągniecia nieznacznie gorszych rezultatów od `mTSLM` model ma duży potencjał do poprawy. Jest kilka godziny dostawy, dla których prognozy modelu okazały się być wyjątkowo odległe od rzeczywistej wartości i prognoz modelu `mTSLM`. To może sugerować kierunek, w którym powinno iść poszukiwanie lepszego modelu sieci neuronowej.
+
+## Bibliografia

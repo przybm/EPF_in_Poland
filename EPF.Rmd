@@ -1339,15 +1339,23 @@ resLM_h %>% plotMAE()
 
 ```
 
-Poprawiła się jakość prognoz dla godzin z przedziału od 10 do 21, jednakże nieznacznemu pogorszeniu uległy prognozy dla godzin nocnych i porannych w przypadku modelu ARIMAX. W obu okresach doby model `mTSLM` osiąga najlepsze rezultaty ze wszystkich dotychczas rozważanych modeli, zatem w dalszej części pracy będzie stanowił, obok metod naiwnych, punkt odniesienia dla modelu rekurencyjnej sieci neuronowej.
+Poprawiła się jakość prognoz dla godzin z przedziału od 10 do 21, jednakże nieznacznemu pogorszeniu uległy prognozy dla godzin nocnych i porannych w przypadku modelu ARIMAX. W obu okresach doby model `mTSLM` osiąga najlepsze rezultaty ze wszystkich dotychczas rozważanych modeli.
+
+Do wyboru zmiennych objaśniających w modelu regresji liniowej mTSLM można zastosować również inne metody, które nie dadzą jednego, wspólnego zbioru zmiennych dla wszystkich godzin dostawy, ale wybiorą optymalny zestaw zmiennych dla każdej godziny osobno. W tym celu zastosowano regresję regularyzowaną LASSO, która do funkcji celu w metodzie najmniejszych kwadratów dodaje funkcję kary, równą sumie wartości bezwzględnych współczynników regresji, przemnożoną przez współczynnik $\lambda$. Taka konstrukcja funkcji celu powoduje, że relatywnie małe współczynniki regresji są sprowadzane do 0 i w tej sposób eliminowane z równania.
+
+Optymalna wartość parametru $\lambda$ została wybrana przy wykorzystaniu dziesięciokrotnej walidacji krzyżowej dla każdej godziny dostawy osobno.
+
+Model ze współczynnikami wybranymi regresją regularyzowaną LASSO (`mGLMNET`) osiągnął zbliżone wyniki do modelu mTSLM.
 
 ```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Średni błąd bezwzględny (MAE) w zbiorze testowym w zależności od godziny dostawy"}
 
-resGLMNET_h <- bind_rows(resLM_h, resGLMNET_h)
+resGLMNET_h <- resLM_h %>% filter(name != "mARIMAX") %>% bind_rows(resGLMNET_h)
 
 resGLMNET_h %>% plotMAE_h()
 
 ```
+
+Nieco lepsze wyniki modelu `mGLMNET` zaobserwowano w nocy i rano. 
 
 ```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Średni błąd bezwzględny (MAE)"}
 
@@ -1355,12 +1363,16 @@ resGLMNET_h %>% plotMAE()
 
 ```
 
+Łączny średni błąd bezwzględny (MAE) dla poszczególnych modeli przedstawiono w tabeli poniżej. 
+
 ```{r echo=FALSE, message=FALSE, warning=FALSE}
 
 resGLMNET_h %>% tableMAE() %>%
   kable(caption = "Łączny średni błąd bezwzględny (MAE) w zbiorze testowym")
 
 ```
+
+W dalszej części pracy model `mTSLM` będzie stanowił, obok metod naiwnych, punkt odniesienia dla modelu rekurencyjnej sieci neuronowej.
 
 ### Rekurencyjna sieć neuronowa
 

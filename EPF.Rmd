@@ -8,7 +8,7 @@ output:
   bookdown::word_document2:
     reference_docx: EPF_style.docx
     toc: TRUE
-    number_sections: FALSE
+    number_sections: TRUE
 toc-title: Spis treści
 ---
 
@@ -36,7 +36,9 @@ trainRNN <- FALSE
 
 ```
 
-## Modelowanie cen energii
+\newpage
+
+# Modelowanie cen energii
 
 Energia elektryczna jest bardzo szczególnym towarem z kilku powodów. Ze względu na trudności związane z jej przechowywaniem i magazynowaniem oraz pomimo postępów w zakresie wydajności baterii w ostatnich latach, nadal jest w dużej mierze dobrem nietrwałym. Bezpieczeństwo dostaw energii elektrycznej do odbiorców końcowych wymaga stałej równowagi między wielkością produkcji a zapotrzebowaniem, z których oba są zależne od warunków pogodowych i intensywności działalności gospodarczej. Ponadto, w porównaniu z innymi towarami hurtowe ceny energii elektrycznej na rynku spot wykazują się sezonowością dobową, tygodniową i miesięczną oraz charakteryzują się niestabilnością i wysoką zmiennością [@epf].
 
@@ -57,7 +59,7 @@ Do prognozowania cen energii elektrycznej w krótkim terminie stosuje się róż
 Intuicja podpowiada, że dobrą prognozą takich cen mogą być ceny z dnia poprzedniego lub ceny z danego dnia z poprzedniego tygodnia, czyli z uwzględnieniem tygodniowej sezonowości, którą charakteryzują się hurtowe ceny energii elektrycznej. Obie metody mogą stanowić punkt odniesienia do oceny przygotowanych modeli.
 Zbudowane zostaną modele ARIMA, regresji liniowej, regresji liniowej z błędami ARIMA (ARIMAX) oraz rekurencyjnej sieci neuronowej z dwukierunkową warstwą jednostek typu GRU. Do uczenia modeli zostaną wykorzystane historyczne ceny kontraktów godzinowych oraz prognozy na zapotrzebowanie mocy, które są łatwo dostępne.
 
-## Metodologia
+# Metodologia
 
 W celu rozwiązania sformułowanego we wstępie pracy zadania, proponowany model musi każdego dnia przed godziną 10:30, kiedy ustalany jest kurs jednolity, prognozować ceny kontraktów terminowych na dwadzieścia cztery godziny dostawy następnej doby, na podstawie dostępnych informacji. Warunek ten nakłada na model konieczność prognozowania dwudziestu czterech wartości łącznie.
 
@@ -79,9 +81,11 @@ gdzie $n$ jest liczbą obserwacji w zbiorze, $C_i$ ceną energii elektrycznej a 
 
 Dla każdego z modeli policzony zostanie średni błąd bezwzględny dla wszystkich obserwacji oraz średni błąd bezwzględny w zależności od godziny dostawy, na którą zawierany jest kontrakt, będący przedmiotem prognozy. Pozwoli to dokładniej ocenić jakość prognoz poszczególnych modeli i wskazać ich przewagi nad metodami naiwnymi, o ile takie przewagi istnieją.
 
-## Analiza i wyniki modelowania
+\newpage
 
-### Źródła i opis danych
+# Analiza i wyniki modelowania
+
+## Źródła i opis danych
 
 W pracy wykorzystano dwa źródła danych: archiwalne ceny kontraktów godzinowych oraz archiwalne prognozowane zapotrzebowanie mocy.
 
@@ -181,7 +185,7 @@ rm(temp, temp1, temp2, read_Loads, srcFiles, specialCases)
 
 ```
 
-### Wstępna analiza
+## Wstępna analiza
 
 Poziom i zmienność cen kontraktów godzinowych na przestrzeni ubiegłych trzech lat przedstawia poniższy wykres. Można zauważyć, że od połowy roku 2017 i przez cały rok 2018 znacznie częściej występowały obserwacje odstające. Ponadto ceny w roku 2017 były wyraźnie niższe niż w latach 2018 i 2019, w którym nastąpiła stabilizacja cen, rozumiana jako niewielki udział liczby godzin, dla których cena jest obserwacją odstającą i jej niższy niż w poprzednich latach poziom w relacji do mediany.
 
@@ -450,7 +454,7 @@ gc()
 
 ```
 
-### Przygotowanie danych do modelowania
+## Przygotowanie danych do modelowania
 
 Przed przystąpieniem do budowy modeli konieczne jest przygotowanie danych. Oprócz opisanych wcześniej przekształceń, polegających na usunięciu nadmiarowych obserwacji lub uzupełnieniu braków danych w przypadku dni, w których następuje zmiana czasu, zaobserwowane podczas wstępnej analizy różne rodzaje sezonowości zostały odzwierciedlone w zmiennych utworzonych metodą kodowania gorącej jedynki, w szczególności wprowadzono zmienne identyfikujące miesiąc roku, dzień tygodnia oraz godzinę dostawy, które zostaną wykorzystane w trenowaniu modeli.
 Modele zbudowane na szeregach o odstępach równych jednej dobie dla każdej godziny osobno nie zawierają w sobie żadnych informacji o cenach kontraktów w pozostałych godzinach doby. W związku z tym przygotowane zostały zmienne pomocnicze dla regresji liniowej i modeli klasy ARIMAX, w szczególności zmienne zawierające ceny z poprzedzających daną obserwację dwudziestu trzech godzin dostawy oraz zmienne zawierające kursy jednolite z poprzedniego dnia. Ponadto do modelu regresji liniowej wprowadzona zostanie zmienna, informująca o cenie kontraktu w danej godzinie sprzed tygodnia.
@@ -580,7 +584,7 @@ rm(temp)
 
 ```
 
-### Model ARIMA dla szeregu czasowego o odstępie równym jednej godzinie
+## Model ARIMA dla szeregu czasowego o odstępie równym jednej godzinie
 
 ```{r message=FALSE, warning=FALSE, include=FALSE}
 
@@ -892,7 +896,7 @@ temp_diff %>% mutate(Day_group = if_else(Day_abbr == "sob.", "sob", "poz")) %>%
 
 Modele `mARIMA1` i `mARIMA2` nie osiągnęły zadowalających rezultatów, natomiast prognozy modelu `mARIMA3` można uznać za umiarkowanie zadowalające. Jednym z powodów jest złożoność szeregu czasowego, w szczególności występowanie sezonowości o kilku okresach. Model uwzględnił jedynie sezonowość dobową, ponieważ formuła modelu umożliwia uwzględnienie tylko jednego rodzaju sezonowości. W związku z tym konieczna jest taka konstrukcja modelu prognostycznego, która weźmie pod uwagę również występowanie sezonowości tygodniowej.
 
-### Modele dla szeregów czasowych o odstępie równym jednej dobie
+## Modele dla szeregów czasowych o odstępie równym jednej dobie
 
 Złożony charakter sezonowości występującej w szeregu czasowym sugeruje jego dekompozycję na dwadzieścia cztery podszeregi dla każdej godziny dostawy osobno, o odstępie równym jednej dobie i zbudowanie oddzielnego modelu na każdym takim podszeregu.
 
@@ -1374,7 +1378,7 @@ resGLMNET_h %>% tableMAE() %>%
 
 W dalszej części pracy model `mTSLM` będzie stanowił, obok metod naiwnych, punkt odniesienia dla modelu rekurencyjnej sieci neuronowej.
 
-### Rekurencyjna sieć neuronowa
+## Rekurencyjna sieć neuronowa
 
 ```{r message=FALSE, warning=FALSE, include=FALSE}
 
@@ -1639,7 +1643,9 @@ temp_resid %>% plotMAE()
 
 Średni błąd bezwzględny prognoz w zbiorze testowym modelu opartego o rekurencyjną sieć neuronową (`mRNN`) jest nieznacznie wyższy od błędu modelu regresji liniowej (`mTSLM`). Model `mTSLM` osiągnął lepsze rezultaty zarówno w dzień jak również w godzinach nocnych i porannych (wykres \@ref(fig:mae-all)). Przyczyniły się do tego relatywnie duże błędy modelu `mRNN` dla kilku godzin w ciągu doby (`r delta_hours`). Analizując wartości błędu MAE w zależności od godziny dostawy (wykres \@ref(fig:mae-hour)) można zauważyć, że w przypadku pozostałych godzin, sieć osiągnęła podobne lub lepsze rezultaty od modelu `mTSLM`, jednak skala błędu we wspomnianych wyżej godzinach jest na tyle duża, że łączny średni błąd bezwzględny okazuje się być wyższy niż dla modelu `mTSLM`. 
 
-## Podsumowanie
+\newpage
+
+# Podsumowanie
 
 Ceny kontaktów godzinowych na energię elektryczną stanowią niestacjonarny szereg czasowy o wielookresowej sezonowości. Ta własność szeregu stanowi utrudnienie w stosowaniu klasycznych modeli autoregresyjnych, które mogą uwzględnić tylko jeden rodzaj sezonowości. Z drugiej strony, ceny energii elektrycznej zdają się kształtować się według pewnego wzorca, który powinien ułatwić sformułowanie modelu i prognozowanie cen.
 
@@ -1651,4 +1657,6 @@ mówi, że cena kontraktu zależy od ceny dla danej godziny sprzed tygodnia, cen
 
 W tym kontekście model zbudowany w oparciu o rekurencyjną sieć neuronową należy ocenić niejednoznacznie. Ze wszystkich rozważanych w pracy modeli, jest najbardziej czasochłonny i wymagający obliczeniowo, co znacząco utrudnia optymalizację jego hiperparametrów, takich jak liczba jednostek w warstwie rekurencyjnej, jej typ (GRU czy LSTM), długość sekwencji. Ponadto w przeciwieństwie do modelu regresji liniowej `mTSLM` nie daje żadnych informacji jakie zmienne wpływają na wartość kontraktu w przyszłości. Z drugiej strony, pomimo osiągniecia nieznacznie gorszych rezultatów od `mTSLM` model ma duży potencjał do poprawy. Jest kilka godziny dostawy, dla których prognozy modelu okazały się być wyjątkowo odległe od rzeczywistej wartości i prognoz modelu `mTSLM`. To może sugerować kierunek, w którym powinno iść poszukiwanie lepszego modelu sieci neuronowej.
 
-## Bibliografia
+\newpage
+
+# Bibliografia

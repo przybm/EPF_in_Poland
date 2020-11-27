@@ -38,6 +38,10 @@ trainRNN <- FALSE
 
 \newpage
 
+# Wstęp {-}
+
+\newpage
+
 # Modelowanie cen energii
 
 Energia elektryczna jest bardzo szczególnym towarem z kilku powodów. Ze względu na trudności związane z jej przechowywaniem i magazynowaniem oraz pomimo postępów w zakresie wydajności baterii w ostatnich latach, nadal jest w dużej mierze dobrem nietrwałym. Bezpieczeństwo dostaw energii elektrycznej do odbiorców końcowych wymaga stałej równowagi między wielkością produkcji a zapotrzebowaniem, z których oba są zależne od warunków pogodowych i intensywności działalności gospodarczej. Ponadto, w porównaniu z innymi towarami hurtowe ceny energii elektrycznej na rynku spot wykazują się sezonowością dobową, tygodniową i miesięczną oraz charakteryzują się niestabilnością i wysoką zmiennością [@epf].
@@ -1645,7 +1649,7 @@ temp_resid %>% plotMAE()
 
 \newpage
 
-# Podsumowanie
+# Podsumowanie {-}
 
 Ceny kontaktów godzinowych na energię elektryczną stanowią niestacjonarny szereg czasowy o wielookresowej sezonowości. Ta własność szeregu stanowi utrudnienie w stosowaniu klasycznych modeli autoregresyjnych, które mogą uwzględnić tylko jeden rodzaj sezonowości. Z drugiej strony, ceny energii elektrycznej zdają się kształtować się według pewnego wzorca, który powinien ułatwić sformułowanie modelu i prognozowanie cen.
 
@@ -1659,4 +1663,4 @@ W tym kontekście model zbudowany w oparciu o rekurencyjną sieć neuronową nal
 
 \newpage
 
-# Bibliografia
+# Bibliografia {-}

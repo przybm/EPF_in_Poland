@@ -40,6 +40,8 @@ trainRNN <- FALSE
 
 # Wstęp {-}
 
+
+
 \newpage
 
 # Modelowanie cen energii

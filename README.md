@@ -6,5 +6,6 @@ W pracy przedstawiono wyniki modeli prognozujących hurtowe ceny energii elektry
 
 **Pliki**
 
+* env.R – plik inicjujący środowisko i instalujący niezbędne pakiety
 * main.R – plik z instrukcją renderującą dokument
 * EPF.Rmd – dokument RMarkdown zawierający treść pracy i niezbędne kody

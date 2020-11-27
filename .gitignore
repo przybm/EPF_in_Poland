@@ -37,3 +37,9 @@ vignettes/*.pdf
 
 # R Environment Variables
 .Renviron
+
+# renv library
+/renv/
+
+# EPF files
+/EPF_files/

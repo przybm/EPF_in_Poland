@@ -40,11 +40,15 @@ trainRNN <- FALSE
 
 # Wstęp {-}
 
+Celem pracy jest zbudowanie i porównanie kilku wybranych modeli prognozowania cen kontraktów godzinowych na dostawę energii elektrycznej na rynku dnia następnego, prowadzonym przez Towarową Giełdę Energii S.A. Źródłem danych są powszechnie dostępne, historyczne ceny kontraktów oraz odpowiadające im prognozy zapotrzebowania mocy.
 
+W pracy przedstawiono modele ARIMA, regresji liniowej z błędami ARIMA, regresji liniowej oraz rekurencyjnej sieci neuronowej i porównano ich wyniki z metodami naiwnymi.
+
+Praca składa się z trzech rozdziałów. W rozdziale pierwszym omówiono podstawowe zagadnienia związane z modelowaniem cen energii elektrycznej. W rozdziale drugim przedstawiono zastosowane narzędzia i metodologię. Rozdział trzeci zawiera opis źródeł danych, wnioski z przeprowadzonej analizy eksploracyjnej oraz wyniki prognozowania wybranych modeli. 
 
 \newpage
 
-# Modelowanie cen energii
+# Modelowanie cen energii elektrycznej
 
 Energia elektryczna jest bardzo szczególnym towarem z kilku powodów. Ze względu na trudności związane z jej przechowywaniem i magazynowaniem oraz pomimo postępów w zakresie wydajności baterii w ostatnich latach, nadal jest w dużej mierze dobrem nietrwałym. Bezpieczeństwo dostaw energii elektrycznej do odbiorców końcowych wymaga stałej równowagi między wielkością produkcji a zapotrzebowaniem, z których oba są zależne od warunków pogodowych i intensywności działalności gospodarczej. Ponadto, w porównaniu z innymi towarami hurtowe ceny energii elektrycznej na rynku spot wykazują się sezonowością dobową, tygodniową i miesięczną oraz charakteryzują się niestabilnością i wysoką zmiennością [@epf].
 

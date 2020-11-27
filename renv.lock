@@ -8,6 +8,11 @@
       }
     ]
   },
+  "Python": {
+    "Version": "3.6.11",
+    "Type": "conda",
+    "Name": null
+  },
   "Packages": {
     "BH": {
       "Package": "BH",
@@ -1024,9 +1029,5 @@
       "Repository": "CRAN",
       "Hash": "ee9b643aa8331c45d8d82eb3a137c9bc"
     }
-  },
-  "Python": {
-    "Version": "Python was not found; run without arguments to install from the Microsoft Store, or disable this shortcut from Settings > Manage App Execution Aliases.",
-    "Type": "conda"
   }
 }

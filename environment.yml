@@ -1,0 +1,15 @@
+name: null
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - certifi=2020.11.8=py36ha15d459_0
+  - pip=20.2.4=py_0
+  - python=3.6.11=h6f26aa1_2_cpython
+  - python_abi=3.6=1_cp36m
+  - setuptools=49.6.0=py36hd36e781_2
+  - vc=14.1=h869be7e_1
+  - vs2015_runtime=14.16.27012=h30e32a0_2
+  - wheel=0.35.1=pyh9f0ad1d_0
+  - wincertstore=0.2=py36h9f0ad1d_1005
+prefix: C:\Users\macie\OneDrive\Dokumenty\EPF_in_Poland\renv\python\condaenvs\renv-python
